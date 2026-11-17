@@ -2,18 +2,27 @@
 
 import argparse
 import json
+import logging
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from gateway.providers import PROVIDERS
-from gateway.service import ValidationError, chat
+from gateway.service import DEFAULT_ROUTER, ValidationError, chat
+from gateway.reliability import AllProvidersFailed, Policy, Router, Simulator
 
 MAX_BODY_BYTES = 65_536
-ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST"}
+ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET"}
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
+    def _router(self):
+        return getattr(self.server, "router", DEFAULT_ROUTER)
+
+    def log_message(self, format, *args):
+        # The default access log includes user-controlled URLs.
+        pass
+
     def _json(self, status, payload, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -43,6 +52,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._json(200, {"status": "healthy", "service": "AI Model Gateway & Reliability Platform"})
         elif path == "/providers":
             self._json(200, {"providers": list(PROVIDERS), "simulated": True})
+        elif path == "/metrics":
+            self._json(200, self._router().metrics())
         else:
             self._handle_chat()
 
@@ -74,9 +85,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._error(400, "Request body must be valid UTF-8 JSON.")
             return
         try:
-            result = chat(payload)
+            result = chat(payload, self._router())
         except ValidationError as exc:
             self._error(400, str(exc))
+            return
+        except AllProvidersFailed as exc:
+            self._json(503, {"status": "error", "error": str(exc), "providers": exc.failures})
             return
         self._json(200, result)
 
@@ -93,16 +107,32 @@ class GatewayHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _dispatch
 
 
-def create_server(host="127.0.0.1", port=8000):
-    return ThreadingHTTPServer((host, port), GatewayHandler)
+def create_server(host="127.0.0.1", port=8000, router=None):
+    server = ThreadingHTTPServer((host, port), GatewayHandler)
+    server.router = router or Router()
+    return server
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run the simulated AI gateway locally.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--config", help="JSON provider policies (loaded at startup)")
+    parser.add_argument("--simulation-file", help="Live JSON provider outcome sequences")
     args = parser.parse_args()
-    with create_server(args.host, args.port) as server:
+    policies = {}
+    if args.config:
+        try:
+            with open(args.config, encoding="utf-8") as source:
+                policies = {name: Policy(**values) for name, values in json.load(source).items()}
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            parser.error(f"Invalid policy config: {exc}")
+    try:
+        router = Router(policies, Simulator(args.simulation_file))
+    except ValueError as exc:
+        parser.error(str(exc))
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    with create_server(args.host, args.port, router) as server:
         print(f"AI gateway listening on http://{args.host}:{server.server_port}", flush=True)
         try:
             server.serve_forever()

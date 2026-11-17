@@ -2,7 +2,10 @@
 
 from time import perf_counter
 
-from gateway.providers import PROVIDERS, resolve_provider, simulate_response
+from gateway.providers import PROVIDERS, resolve_provider
+from gateway.reliability import Router
+
+DEFAULT_ROUTER = Router()
 
 MAX_PROMPT_LENGTH = 10_000
 
@@ -11,7 +14,7 @@ class ValidationError(ValueError):
     """A client supplied an invalid chat request."""
 
 
-def chat(payload):
+def chat(payload, router=None):
     started = perf_counter()
     if not isinstance(payload, dict):
         raise ValidationError("Request body must be a JSON object.")
@@ -26,7 +29,7 @@ def chat(payload):
     provider = resolve_provider(name.strip())
     if provider is None:
         raise ValidationError(f"Unknown provider. Choose one of: {', '.join(PROVIDERS)}.")
-    response = simulate_response(prompt.strip(), provider)
+    response, provider = (router or DEFAULT_ROUTER).route(prompt.strip(), provider)
     return {
         "response": response,
         "provider": provider,

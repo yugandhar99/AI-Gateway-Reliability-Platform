@@ -7,3 +7,7 @@ htmlcov/
 .pytest_cache/
 .env
 .DS_Store
+
+# Local failure simulation inputs and temporary replacements
+/simulation.json
+/simulation.*.json
