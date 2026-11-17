@@ -44,19 +44,21 @@ def chat(payload, router=None):
     }
 
 
+def token_reservation(prompt):
+    return estimate_tokens(prompt) + max(
+        estimate_tokens(simulate_response(prompt, provider)) for provider in PROVIDERS)
+
+
 def customer_chat(payload, router, store, customer):
     """Reserve quota around the unchanged router and settle exactly once."""
     prompt, _ = validate_chat(payload)
-    input_tokens = estimate_tokens(prompt)
-    reservation = input_tokens + max(
-        estimate_tokens(simulate_response(prompt, provider)) for provider in PROVIDERS)
-    ticket = store.admit(customer, reservation)
+    ticket = store.admit(customer, token_reservation(prompt))
     try:
         result = chat(payload, router)
     except Exception:
         store.finish(ticket)
         raise
-    tokens = input_tokens + estimate_tokens(result["response"])
+    tokens = estimate_tokens(prompt) + estimate_tokens(result["response"])
     store.finish(ticket, tokens)
     router.observability.add_tokens(tokens)
     return result

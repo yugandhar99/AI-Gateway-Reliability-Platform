@@ -2,7 +2,7 @@
   "uid": "ai-gateway",
   "title": "AI Gateway Reliability",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "15s",
   "time": {
     "from": "now-15m",
@@ -344,6 +344,179 @@
         "defaults": {
           "unit": "short",
           "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "Inference jobs by state",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_jobs",
+          "refId": "A",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "title": "Inference queue pressure",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum without (state) (gateway_jobs{state=~\"queued|running\"}) / gateway_queue_capacity",
+          "refId": "A",
+          "legendFormat": "Active / capacity"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 15,
+      "title": "Oldest ready inference job",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_queue_oldest_ready_seconds",
+          "refId": "A",
+          "legendFormat": "Ready age"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 16,
+      "title": "Inference workers",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_workers_alive",
+          "refId": "A",
+          "legendFormat": "Alive"
+        },
+        {
+          "expr": "gateway_workers_configured",
+          "refId": "B",
+          "legendFormat": "Configured"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 17,
+      "title": "Inference retries and lease recovery",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "increase(gateway_job_events_total{event=~\"retried|lease_expired|dead_letter\"}[5m])",
+          "refId": "A",
+          "legendFormat": "{{event}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 18,
+      "title": "Inference submission backpressure",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 64,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_http_requests_total{route=\"/jobs\",method=\"POST\",status=\"429\"}[5m])) or vector(0)",
+          "refId": "A",
+          "legendFormat": "HTTP 429"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
         },
         "overrides": []
       }

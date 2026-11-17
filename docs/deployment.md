@@ -20,6 +20,29 @@ docker compose stop
 
 `docker_smoke.py` makes a synthetic request and restarts/recreates the Compose gateway to verify persistence. Run it only against a demonstration stack you can interrupt. Compose keeps the named usage volume; do not use `down -v` if you need accounting records. Environment-backed keys can be viewed by Docker administrators; monitoring Compose instead mounts key files.
 
+### Inference workers in the image
+
+The image runs the gateway as UID and GID 10001 with an exec-form command.
+The command binds port 8000 inside the container and stores both usage and
+inference state in `/data/usage.sqlite3`. A newly initialized named volume
+inherits the image directory's ownership. For a bind mount, provision a
+private directory writable by UID 10001 before startup.
+
+The default command starts two inference workers in the gateway process.
+To override the count, replace the image command with
+`python -m gateway.server --host 0.0.0.0 --port 8000 --usage-db /data/usage.sqlite3 --workers N`.
+Use `0` for API-only mode or `1`–`64` to run workers alongside HTTP.
+The same command accepts the queue, retry, and lease flags described in the
+[inference runbook](runbooks/inference.md). The image health check probes
+`/health`. Use authenticated Prometheus worker and queue metrics to verify
+processing. When increasing provider timeouts or retries, set the container
+stop grace period long enough for active jobs to finish. SIGTERM stops fresh
+claims and gives active workers time to settle their claims. Queued work stays
+in SQLite.
+
+To test a newly built image without interrupting Compose, use the
+[isolated Ubuntu smoke commands](validation.md#repeat-the-container-smoke-on-ubuntu).
+
 The CI smoke test creates separate containers with no published host ports and a unique volume:
 
 ```bash

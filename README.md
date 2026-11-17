@@ -158,7 +158,7 @@ python3 scripts/check_monitoring.py
 docker compose --env-file .env.monitoring -f compose.monitoring.yaml stop
 ```
 
-Prometheus scrapes `/metrics/prometheus` using a dedicated mounted credential. Grafana is at `http://127.0.0.1:3000`, username `admin`; retrieve the generated password privately from `secrets/monitoring/grafana`. The [monitoring guide](docs/monitoring.md) maps all twelve panels to their operational purpose and links the provisioned dashboard. Alerts cover scrape availability, P95 latency above 500ms, and chat 5xx rates above 10%.
+Prometheus scrapes `/metrics/prometheus` using a dedicated mounted credential. Grafana is at `http://127.0.0.1:3000`, username `admin`; retrieve the generated password privately from `secrets/monitoring/grafana`. The [monitoring guide](docs/monitoring.md) maps all eighteen panels to their operational purpose and links the provisioned dashboard. Alerts cover scrape availability, P95 latency above 500ms, and chat 5xx rates above 10%.
 
 Follow the [deployment guide](docs/deployment.md) for Docker smoke tests, namespace and Secret creation, image loading, storage prerequisites, raw Kubernetes installation, Helm installation, rollback, and monitoring validation. GitHub Actions builds and tests locally within CI; it does not push images or deploy a cluster.
 
@@ -203,7 +203,7 @@ The [existing CI workflow](.github/workflows/ci.yml) remains unchanged. The live
 
 ## Testing
 
-Final verification passed **70 Python tests**, all **13 container smoke checks**, compilation, dashboard and infrastructure validation, Prometheus alert fixtures, live monitoring integration, and isolated HTTP incident detection with the approval guard. Host Python was 3.14.4; CI targets Python 3.13. The [validation record](docs/validation.md) records the checks and their limits; they do not establish a cloud deployment or production readiness.
+The original reliability release passed **70 Python tests**, all **13 container smoke checks**, compilation, dashboard and infrastructure validation, Prometheus alert fixtures, live monitoring integration, and isolated HTTP incident detection with the approval guard. Host Python was 3.14.4; CI targets Python 3.13. The [validation record](docs/validation.md) records the checks and their limits; they do not establish a cloud deployment or production readiness.
 
 ```bash
 python3 -m unittest discover -v
@@ -267,7 +267,7 @@ A public GitHub Actions run verified as completed successfully through the GitHu
 
 ## Limitations and project roadmap
 
-The standard-library HTTP server is a teaching implementation without built-in TLS, request read timeouts, or a production concurrency limit. `/health` checks process liveness, not provider or storage readiness. Metrics and circuit state reset on restart. SQLite and process-local routing require one replica; updates use Recreate and may interrupt service. No streaming, real provider calls, production tokenizer, billing integration, external alert delivery, or cloud deployment is included. Approval uses a shared admin key and does not enforce two-person separation of duties.
+The standard-library HTTP server is a teaching implementation without built-in TLS, request read timeouts, or a production concurrency limit. `/health` checks process liveness, not provider or storage readiness. HTTP and routing metrics and circuit state reset on restart. Queue state and transition counters persist. SQLite and process-local routing require one replica; updates use Recreate and may interrupt service. No streaming, real provider calls, production tokenizer, billing integration, external alert delivery, or cloud deployment is included. Approval uses a shared admin key and does not enforce two-person separation of duties.
 
 Planned work, with no delivery dates committed:
 
@@ -293,3 +293,14 @@ Planned work, with no delivery dates committed:
 Historical privacy findings remain unresolved; consult the publication audit before publishing Git history. No license has been selected; do not assume an open-source reuse license.
 
 <p align="center"><a href="https://github.com/yugandhar99">GitHub portfolio</a> · Built to demonstrate practical platform engineering.</p>
+
+## Asynchronous inference
+
+Submit simulated inference with `POST /jobs`, poll `GET /jobs/{id}`, retrieve
+the result at `GET /jobs/{id}/result`, or cancel with `DELETE /jobs/{id}`.
+Jobs and quota reservations persist in the same SQLite database. The
+gateway starts two queue workers by default.
+
+See the [API contract](docs/api.md#asynchronous-inference),
+[architecture and guarantees](docs/architecture.md#asynchronous-inference),
+and [live integration and operations runbook](docs/runbooks/inference.md).

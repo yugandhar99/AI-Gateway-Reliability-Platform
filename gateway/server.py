@@ -3,12 +3,17 @@
 import argparse
 import json
 import logging
+import re
+import signal
 import sqlite3
+from threading import Thread
 from time import perf_counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
+from gateway.jobs import JobConflict, JobQueue, QueueConfig
+from gateway.workers import WorkerPool
 from gateway.incidents import IncidentEngine, IncidentError
 from gateway.providers import PROVIDERS
 from gateway.service import DEFAULT_ROUTER, ValidationError, customer_chat
@@ -18,7 +23,8 @@ from gateway.security import AuthenticationError, KeyRegistry, environment_key
 from gateway.usage import LimitExceeded, UsageStore
 
 MAX_BODY_BYTES = 65_536
-ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET", "/usage": "GET", "/metrics/prometheus": "GET"}
+ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET", "/usage": "GET", "/metrics/prometheus": "GET", "/jobs": "POST"}
+JOB_PATH = re.compile(r"/jobs/([0-9a-f]{32})(/result)?")
 
 ROUTES.update({"/incidents":"GET", "/incidents/recommendations":"GET",
                "/incidents/evaluate":"POST", "/incidents/approve":"POST",
@@ -60,7 +66,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._dispatch_errors()
         finally:
             path = urlsplit(self.path).path
+            match = JOB_PATH.fullmatch(path)
             route = path if path in ROUTES else 'unknown'
+            if match:
+                route = '/jobs/{id}' + (match[2] or '')
             method = self.command if self.command in ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS') else 'OTHER'
             self._router().observability.observe(route, method, self._response_status, perf_counter() - started)
             if path == '/chat' and getattr(self.server, 'incidents', None) is not None:
@@ -77,7 +86,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except LimitExceeded as exc:
             headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
             self._json(429, {"status": "error", "error": str(exc), "code": exc.code}, headers)
-        except IncidentError as exc:
+        except ValidationError as exc:
+            self._error(400, str(exc))
+        except (IncidentError, JobConflict) as exc:
             self._error(409, str(exc))
         except sqlite3.Error:
             self._error(503, "Persistent application storage is unavailable. Retry later.")
@@ -91,7 +102,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def _dispatch_authenticated(self):
         path = urlsplit(self.path).path
         allowed = ROUTES.get(path)
-        if allowed is None:
+        job_path = JOB_PATH.fullmatch(path)
+        if job_path:
+            self._handle_job(self._authenticate(), job_path)
+        elif allowed is None:
             self._error(404, "Endpoint not found.")
         elif self.command != allowed:
             self._error(405, f"Use {allowed} for {path}.", {"Allow": allowed})
@@ -126,6 +140,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if getattr(self.server, 'incidents', None) is not None:
                 self.server.incidents.evaluate()
             data = self._router().observability.render(self._router())
+            if getattr(self.server, "jobs", None) is not None:
+                data += self.server.jobs.prometheus() + self.server.workers.prometheus()
             self._response_status = 200
             self.send_response(200)
             self.send_header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
@@ -139,36 +155,83 @@ class GatewayHandler(BaseHTTPRequestHandler):
         elif path == "/usage":
             customer = self._authenticate()
             self._json(200, self.server.usage_store.usage(customer))
+        elif path == "/jobs":
+            self._submit_job(self._authenticate())
         else:
             customer = self._authenticate()
             self._handle_chat(customer)
 
-    def _handle_chat(self, customer, incident_path=None):
+    def _submit_job(self, customer):
+        queue = getattr(self.server, "jobs", None)
+        if queue is None:
+            self._error(503, "Inference queue unavailable.")
+            return
+        keys = self.headers.get_all("Idempotency-Key", [])
+        if len(keys) > 1:
+            raise ValidationError("Provide at most one Idempotency-Key.")
+        valid, payload = self._read_json()
+        if valid:
+            job, created = queue.submit(customer, payload, keys[0] if keys else None)
+            self._json(202 if created else 200, job, {"Location": "/jobs/" + job["id"]})
+
+    def _handle_job(self, customer, match):
+        job_id, result_path = match.groups()
+        allowed = ("GET",) if result_path else ("GET", "DELETE")
+        if self.command not in allowed:
+            self._error(405, "Method not allowed.", {"Allow": ", ".join(allowed)})
+            return
+        queue = getattr(self.server, "jobs", None)
+        if queue is None:
+            self._error(503, "Inference queue unavailable.")
+            return
+        if self.command == "DELETE":
+            job = queue.cancel(customer.customer_id, job_id)
+            result = None
+        else:
+            job, result = queue.get(customer.customer_id, job_id)
+        if job is None:
+            self._error(404, "Job not found.")
+        elif not result_path:
+            self._json(200, job)
+        elif job["status"] == "succeeded":
+            self._json(200, {"id": job_id, "result": result})
+        elif job["status"] in ("queued", "running"):
+            self._json(202, job, {"Retry-After": "1"})
+        else:
+            self._json(409, job)
+
+    def _read_json(self):
         if self.headers.get("Transfer-Encoding") is not None:
             self._error(400, "Transfer-Encoding is not supported; use Content-Length.")
-            return
+            return False, None
         if self.headers.get_content_type() != "application/json":
             self._error(415, "Content-Type must be application/json.")
-            return
+            return False, None
         lengths = self.headers.get_all("Content-Length", [])
         if not lengths:
             self._error(411, "Content-Length is required.")
-            return
-        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+            return False, None
+        if len(lengths) != 1 or len(lengths[0]) > 20 or not lengths[0].isascii() or not lengths[0].isdigit():
             self._error(400, "Content-Length must be a non-negative integer.")
-            return
+            return False, None
         length = int(lengths[0])
         if length > MAX_BODY_BYTES:
             self._error(413, f"Request body must be at most {MAX_BODY_BYTES} bytes.")
-            return
+            return False, None
         raw = self.rfile.read(length)
         if len(raw) != length:
             self._error(400, "Incomplete request body.")
-            return
+            return False, None
         try:
             payload = json.loads(raw.decode("utf-8"), parse_constant=self._reject_constant)
         except (UnicodeDecodeError, ValueError, RecursionError):
             self._error(400, "Request body must be valid UTF-8 JSON.")
+            return False, None
+        return True, payload
+
+    def _handle_chat(self, customer, incident_path=None):
+        valid, payload = self._read_json()
+        if not valid:
             return
         if incident_path is not None:
             if not isinstance(payload, dict):
@@ -226,14 +289,25 @@ class GatewayHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _dispatch
 
 
-def create_server(host="127.0.0.1", port=8000, router=None, keys=None, usage_store=None, metrics_key=None, mock_remediation=False):
+class GatewayServer(ThreadingHTTPServer):
+    request_queue_size = 128
+
+    def server_close(self):
+        if getattr(self, "workers", None) is not None:
+            self.workers.close()
+        super().server_close()
+
+
+def create_server(host="127.0.0.1", port=8000, router=None, keys=None, usage_store=None,
+                  metrics_key=None, mock_remediation=False, queue_config=None,
+                  worker_count=2, worker_crash_file=None):
     keys = keys if keys is not None else KeyRegistry.from_environment()
     usage_store = usage_store if usage_store is not None else UsageStore("usage.sqlite3")
     metrics_keys = KeyRegistry(admin_key=metrics_key or environment_key("GATEWAY_METRICS_API_KEY"))
     if metrics_keys.admin is not None and (metrics_keys.admin == keys.admin or any(
             digest == metrics_keys.admin for digest, _ in keys.customers)):
         raise ValueError("Metrics credential must differ from customer and admin credentials")
-    server = ThreadingHTTPServer((host, port), GatewayHandler)
+    server = GatewayServer((host, port), GatewayHandler)
     server.router = router or Router()
     server.metrics_keys = metrics_keys
     server.keys = keys
@@ -242,6 +316,8 @@ def create_server(host="127.0.0.1", port=8000, router=None, keys=None, usage_sto
         server.incidents = IncidentEngine(usage_store.path, server.router, usage_store,
                                           mock_remediation=mock_remediation)
         server.router.observability.incidents = server.incidents
+        server.jobs = JobQueue(usage_store, queue_config)
+        server.workers = WorkerPool(server.jobs, server.router, worker_count, worker_crash_file)
     except Exception:
         server.server_close()
         raise
@@ -257,6 +333,15 @@ def main():
     parser.add_argument("--usage-db", default="usage.sqlite3", help="Persistent SQLite accounting file")
     parser.add_argument("--enable-mock-remediation", action="store_true",
                         help="Allow administrator-approved process-local mock success override")
+    parser.add_argument("--workers", type=int, default=2, help="Inference workers (0 for API-only)")
+    parser.add_argument("--queue-capacity", type=int, default=1000)
+    parser.add_argument("--tenant-queue-capacity", type=int, default=100)
+    parser.add_argument("--job-max-attempts", type=int, default=3)
+    parser.add_argument("--job-lease-seconds", type=float, default=15)
+    parser.add_argument("--job-aging-seconds", type=float, default=60)
+    parser.add_argument("--job-retry-base", type=float, default=1)
+    parser.add_argument("--job-retry-cap", type=float, default=60)
+    parser.add_argument("--worker-crash-file", help="Opt-in: consume this marker and abandon one claimed job")
     args = parser.parse_args()
     policies = {}
     if args.config:
@@ -272,11 +357,22 @@ def main():
     try:
         keys = KeyRegistry.from_environment()
         usage_store = UsageStore(args.usage_db)
+        queue_config = QueueConfig(args.queue_capacity, args.tenant_queue_capacity,
+                                   args.job_max_attempts, args.job_lease_seconds,
+                                   args.job_aging_seconds, args.job_retry_base, args.job_retry_cap)
+        if not 0 <= args.workers <= 64:
+            raise ValueError("Worker count must be between 0 and 64.")
     except (ValueError, sqlite3.Error) as exc:
         parser.error(str(exc))
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with create_server(args.host, args.port, router, keys, usage_store,
-                       mock_remediation=args.enable_mock_remediation) as server:
+                       mock_remediation=args.enable_mock_remediation, queue_config=queue_config,
+                       worker_count=args.workers, worker_crash_file=args.worker_crash_file) as server:
+        def stop(_signum, _frame):
+            server.workers.stopping.set()
+            Thread(target=server.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, stop)
         print(f"AI gateway listening on http://{args.host}:{server.server_port}", flush=True)
         try:
             server.serve_forever()

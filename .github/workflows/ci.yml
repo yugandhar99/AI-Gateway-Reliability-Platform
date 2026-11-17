@@ -22,6 +22,8 @@ jobs:
           python-version: '3.13'
       - name: Python unit tests
         run: python -m unittest discover -v
+      - name: Validate asynchronous inference integration
+        run: python scripts/validate_inference.py
       - name: Compile Python and validate Stage 7 monitoring panels
         run: |
           python -m compileall -q gateway scripts tests

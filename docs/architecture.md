@@ -37,3 +37,67 @@ The incident engine correlates one active routing incident, rather than creating
 Kubernetes and Helm intentionally require a single replica, a Recreate strategy and ReadWriteOncePod storage. This avoids unsupported distributed circuit/metric state and concurrent deployments against the same local database. The chart rejects multiple replicas; its PVC has a keep annotation. Raw manifests have no Helm retention behavior. `/health` is used for probes but does not establish upstream or database readiness.
 
 Containers run as UID/GID 10001. Kubernetes drops capabilities, disables privilege escalation and service-account token mounting, enables RuntimeDefault seccomp and mounts a writable data volume under a read-only root. Compose monitoring uses file-mounted secrets and loopback host bindings. These controls do not provide TLS, encrypted secrets, tenant-specific network isolation, or production traffic hardening.
+
+## Asynchronous inference
+
+```mermaid
+flowchart LR
+    C[Customer client] -->|Bearer key| H[Job HTTP API]
+    H -->|Submit, read, cancel| Q[(SQLite)]
+    Q --- J[Job state, leases, and dead letters]
+    Q --- U[Shared quota and usage ledger]
+    W[Concurrent worker threads] -->|Claim, heartbeat, settle| Q
+    W --> R[Existing router and simulated providers]
+    P[Prometheus] -->|Dedicated bearer key| M[Metrics endpoint]
+    M --> Q
+    M --> W
+    G[Grafana] --> P
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: Submit and reserve usage
+    queued --> running: Claim with fresh lease token
+    running --> running: Renew live lease
+    running --> succeeded: Commit result and charge
+    running --> queued: Failure or expired lease, attempts remaining
+    running --> dead_letter: Failure or expired lease, attempts exhausted
+    queued --> cancelled: Cancel and release
+    running --> cancelled: Cancel and fence claim
+```
+
+SQLite serializes submissions, claims, and terminal transitions using
+`BEGIN IMMEDIATE`. Each claim increments the durable attempt count and
+assigns a fresh token. Heartbeats run every third of a lease. Worker
+heartbeats and completions require a matching token on a running job
+with a lease still live when the transaction checks it. Workers recover
+expired leases while polling, including after a full process restart.
+A claim lost before it calls a provider still uses an attempt.
+
+Execution can happen more than once if a lease expires while a worker is
+still executing. A winning success commits its result and token charge
+in one transaction. Each accepted submission reserves usage once and has
+at most one settled charge. Retries reuse the same reservation and
+admission-month attribution. Cancellation and dead-lettering settle one
+failed request with zero charged tokens. All accepted submissions count
+toward the request rate limit. Rejected submissions and idempotent replays
+consume neither requests nor tokens. The process-local token metric can
+miss a committed settlement if the process exits immediately after commit.
+Use `/usage` for the persisted ledger.
+
+A failed attempt is eligible again after
+`min(retry_cap, retry_base × 2^(attempts−1))` seconds. Lease-expiry backoff
+starts at recovery time. An attempt can include router-level retries and
+provider failover. Eligible jobs are ordered by priority, then by
+eligibility time. Once a job has been eligible for the aging interval, it
+outranks every unaged job and competes by eligibility time. This prevents
+new arrivals from repeatedly overtaking it while workers make progress.
+Running jobs and delayed retries count toward admission capacity.
+
+The queue and usage ledger share one local SQLite file. Run on a persistent
+local volume with synchronized system time. SQLite serializes writes and
+this deployment targets a single host. Terminal jobs and idempotency
+keys are retained indefinitely. Capacity bounds active jobs, while database
+size grows with request history. The dead-letter queue is a durable terminal
+state retrievable through the same tenant job endpoints. There is no replay
+endpoint. To rerun a dead letter, submit with a fresh idempotency key.

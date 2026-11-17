@@ -102,36 +102,44 @@ class UsageStore:
         return datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m')
 
     def admit(self, customer, reservation):
-        now = self.clock()
-        month = self.month(now)
-        tier = TIERS[customer.tier]
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            count, oldest = db.execute(
-                'SELECT COUNT(*), MIN(admitted) FROM requests WHERE customer=? AND admitted>?',
-                (customer.customer_id, now - 60)).fetchone()
-            if count >= tier.requests_per_minute:
-                raise LimitExceeded('rate_limit_exceeded', 'Customer request rate limit exceeded.',
-                                    max(1, math.ceil(oldest + 60 - now)))
-            used = db.execute('''SELECT COALESCE(SUM(CASE WHEN status='pending'
-                THEN reserved ELSE tokens END),0) FROM requests WHERE customer=? AND month=?''',
-                (customer.customer_id, month)).fetchone()[0]
-            if used + reservation > tier.monthly_tokens:
-                raise LimitExceeded('quota_exhausted',
-                                    'Monthly token quota cannot cover this request. Try a shorter prompt or wait for the next UTC month.')
-            return db.execute('INSERT INTO requests(customer,month,admitted,reserved,owner_pid,owner_start,owner_scope) VALUES (?,?,?,?,?,?,?)',
-                              (customer.customer_id, month, now, reservation, *self.process_identity())).lastrowid
+            return self.reserve(db, customer, reservation, self.clock(), self.process_identity())
+
+    def reserve(self, db, customer, reservation, now, owner=(None, None, None)):
+        """Reserve usage inside the caller's write transaction."""
+        month = self.month(now)
+        tier = TIERS[customer.tier]
+        count, oldest = db.execute(
+            'SELECT COUNT(*), MIN(admitted) FROM requests WHERE customer=? AND admitted>?',
+            (customer.customer_id, now - 60)).fetchone()
+        if count >= tier.requests_per_minute:
+            raise LimitExceeded('rate_limit_exceeded', 'Customer request rate limit exceeded.',
+                                max(1, math.ceil(oldest + 60 - now)))
+        used = db.execute('''SELECT COALESCE(SUM(CASE WHEN status='pending'
+            THEN reserved ELSE tokens END),0) FROM requests WHERE customer=? AND month=?''',
+            (customer.customer_id, month)).fetchone()[0]
+        if used + reservation > tier.monthly_tokens:
+            raise LimitExceeded('quota_exhausted',
+                                'Monthly token quota cannot cover this request. Try a shorter prompt or wait for the next UTC month.')
+        return db.execute('INSERT INTO requests(customer,month,admitted,reserved,owner_pid,owner_start,owner_scope) VALUES (?,?,?,?,?,?,?)',
+                          (customer.customer_id, month, now, reservation, *owner)).lastrowid
 
     def finish(self, request_id, tokens=None):
         with self.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT reserved FROM requests WHERE id=? AND status='pending'", (request_id,)).fetchone()
-            if row is None:
-                raise ValueError('Unknown or already settled reservation')
-            if tokens is not None and not 0 <= tokens <= row[0]:
-                raise ValueError('Usage exceeds reservation')
-            db.execute('UPDATE requests SET tokens=?,status=? WHERE id=?',
-                       (tokens or 0, 'success' if tokens is not None else 'failed', request_id))
+            self.settle(db, request_id, tokens)
+
+    @staticmethod
+    def settle(db, request_id, tokens=None):
+        """Settle usage inside the caller's write transaction."""
+        row = db.execute("SELECT reserved FROM requests WHERE id=? AND status='pending'", (request_id,)).fetchone()
+        if row is None:
+            raise ValueError('Unknown or already settled reservation')
+        if tokens is not None and not 0 <= tokens <= row[0]:
+            raise ValueError('Usage exceeds reservation')
+        db.execute('UPDATE requests SET tokens=?,status=? WHERE id=?',
+                   (tokens or 0, 'success' if tokens is not None else 'failed', request_id))
 
     def usage(self, customer):
         now = self.clock()
