@@ -33,3 +33,6 @@ htmlcov/
 *~
 /tmp/
 /temp/
+
+# Local infrastructure validation binaries and rendered output
+/.tools/

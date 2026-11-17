@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-usage
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+spec:
+  accessModes:
+  - ReadWriteOncePod
+  resources:
+    requests:
+      storage: {{ .Values.storage.size | quote }}
+  {{- if ne .Values.storage.storageClassName nil }}
+  storageClassName: {{ .Values.storage.storageClassName | quote }}
+  {{- end }}

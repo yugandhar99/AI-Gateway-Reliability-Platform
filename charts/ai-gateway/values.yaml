@@ -1,0 +1,36 @@
+# Non-secret settings only. API credentials belong in existingSecret.
+replicaCount: 1
+image:
+  repository: ai-gateway
+  tag: stage5
+  pullPolicy: IfNotPresent
+existingSecret: ai-gateway-keys
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  PYTHONUNBUFFERED: '1'
+service:
+  port: 8000
+containerPort: 8000
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+storage:
+  size: 1Gi
+  storageClassName: null
+probes:
+  startup:
+    periodSeconds: 2
+    timeoutSeconds: 2
+    failureThreshold: 30
+  readiness:
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3

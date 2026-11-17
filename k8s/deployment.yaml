@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway
+  labels:
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/instance: ai-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-gateway
+      app.kubernetes.io/instance: ai-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-gateway
+        app.kubernetes.io/instance: ai-gateway
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: gateway
+        image: ai-gateway:stage5
+        imagePullPolicy: IfNotPresent
+        command:
+        - python
+        - -m
+        - gateway.server
+        args:
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        - --usage-db
+        - /data/usage.sqlite3
+        ports:
+        - name: http
+          containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: ai-gateway-config
+        - secretRef:
+            name: ai-gateway-keys
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 2
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        volumeMounts:
+        - name: usage
+          mountPath: /data
+      volumes:
+      - name: usage
+        persistentVolumeClaim:
+          claimName: ai-gateway-usage

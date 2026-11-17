@@ -1,8 +1,277 @@
 # AI Model Gateway & Reliability Platform
 
-Stage 4 adds Docker containerization to the local HTTP API that simulates OpenAI, Anthropic, and Gemini.
+Stage 5 adds Kubernetes manifests, a Helm chart, and GitHub Actions CI to the containerized
+HTTP API that simulates OpenAI, Anthropic, and Gemini.
 It uses only the Python standard library. No real provider API keys, paid services, package
 installation, or external API calls are needed. Local demo bearer keys are required. Python 3.10+ is recommended.
+
+## Stage 5: Kubernetes, Helm, and CI
+
+Stage 5 changes infrastructure and documentation; the application, Dockerfile,
+Compose deployment, and original smoke script keep their existing behavior.
+No cluster is installed or contacted by the validation tools. Deployment commands
+below are reference commands for a separately authorized, existing test cluster.
+
+### Architecture and reliability decisions
+
+```text
+Client -> ClusterIP Service :8000 -> one gateway Pod :8000
+                                      |-- ConfigMap (non-secret environment)
+                                      |-- existing Secret (demo bearer keys)
+                                      `-- PVC -> /data/usage.sqlite3
+```
+
+The Service gives the pod a stable internal address. It has no public load balancer
+or Ingress. The Deployment replaces failed pods. A PVC (PersistentVolumeClaim)
+asks the cluster for a disk that survives pod replacement. The ConfigMap carries
+non-secret environment settings; a separately created Secret supplies credentials.
+This remains a local learning HTTP server, without TLS or production ingress.
+
+- **One writer:** `replicas: 1` and `strategy: Recreate` are deliberate. A rollout
+  terminates the old pod before creating its replacement, causing brief downtime.
+  Helm rejects replica counts other than one. Do not add an autoscaler or manually
+  scale this service. Multi-replica availability needs a shared server database and
+  a review of rate limiting and circuit state first.
+- **Volume exclusivity:** the claim uses `ReadWriteOncePod`, which restricts a disk
+  to one pod. Ordinary `ReadWriteOnce` only limits attachment to one *node*, so two
+  pods on that node could still write together. Recreate covers upgrades;
+  ReadWriteOncePod adds enforcement during other pod replacements. Never force
+  delete a pod on an unreachable node without first confirming it has stopped.
+  See the [Kubernetes rollout documentation](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#recreate-deployment)
+  and [volume access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes).
+- **Storage prerequisites:** target Kubernetes 1.34+ with a CSI StorageClass that
+  supports ReadWriteOncePod and Linux volume permissions (`fsGroup`). The default
+  requests 1 GiB using the cluster's default class. Use a filesystem with reliable
+  SQLite locking; avoid assuming any arbitrary network filesystem is suitable.
+  There is intentionally no fallback to a weaker access mode or ephemeral storage.
+- **Permissions:** the pod and image use UID/GID 10001. `fsGroup: 10001` lets a
+  compatible CSI volume be writable without a privileged root init container.
+  The root filesystem is read-only; only `/data` is mounted writable. All Linux
+  capabilities are dropped, privilege escalation is disabled, seccomp uses
+  RuntimeDefault, and no Kubernetes API token is mounted.
+- **Resources:** requests reserve 100m CPU (one tenth of a core) and 64 MiB RAM;
+  limits cap CPU at 500m and RAM at 256 MiB. These are learning defaults to tune
+  against measurements, not a capacity guarantee.
+- **Probes:** startup allows roughly 60 seconds (30 failures, 2-second intervals).
+  Once startup succeeds, readiness runs every 5 seconds and liveness every 10,
+  each with a 2-second timeout and 3-failure threshold. Readiness controls routing;
+  liveness restarts an unresponsive process. All use public `/health`, which checks
+  HTTP responsiveness, not database writes or provider availability. An accounting
+  failure can still return 503 while health is green; authenticated smoke tests
+  cover writes separately.
+
+### Create credentials safely
+
+Use a dedicated namespace and a new Secret with only this application's keys.
+These are mock gateway bearer keys, unrelated to actual AI provider credentials.
+Do not edit `k8s/secret.yaml.example`: its empty fields show the structure only.
+Do not put keys in Helm values, ConfigMaps, command-line `--set` arguments, or Git.
+
+For an authorized test cluster, create an ignored local file with restrictive
+permissions; the secret values will not appear in shell history or command arguments:
+
+```bash
+kubectl create namespace ai-gateway
+(umask 077; python3 - <<'PYKEYS'
+import secrets
+with open('.env.kubernetes', 'x') as output:
+    for tier in ('STARTER', 'BUSINESS', 'ENTERPRISE', 'ADMIN'):
+        output.write(f'GATEWAY_{tier}_API_KEY={secrets.token_urlsafe(32)}\n')
+PYKEYS
+)
+kubectl -n ai-gateway create secret generic ai-gateway-keys \
+  --from-env-file=.env.kubernetes
+```
+
+The exclusive file creation refuses to overwrite existing keys. `.env.*` is
+ignored, and `.dockerignore` excludes credentials from build contexts. Protect
+this local file and transfer credentials through your normal secret manager.
+Kubernetes Secrets are base64 encoded, not automatically encrypted: cluster
+operators should enable encryption at rest and restrict Secret RBAC. Do not dump
+Secret YAML or pod environments into logs. At least one customer tier must be
+configured; admin credentials must differ from customer credentials.
+
+Environment Secrets load at process start. After updating the Secret through your
+approved process, restart the deployment to pick up the new values:
+`kubectl -n ai-gateway rollout restart deployment/ai-gateway`. This has downtime.
+Helm automatically triggers a replacement when its ConfigMap changes; raw
+ConfigMap changes need an explicit rollout restart too.
+
+### Deploy with plain manifests
+
+Choose either plain manifests or Helm in a namespace, since their default names
+are the same. Do not install both against the same claim. Build the image using
+`docker build -t ai-gateway:stage5 .` and make it available to the existing test
+cluster through its approved image-loading process. A host Docker image is not
+necessarily visible to cluster nodes. For a remote image, change the Deployment's
+image reference to the approved repository and immutable tag or digest. This
+assignment never pushes images.
+
+```bash
+# Review/edit image and, if needed, storageClassName in k8s/pvc.yaml first.
+kubectl -n ai-gateway apply -f k8s/configmap.yaml -f k8s/pvc.yaml \
+  -f k8s/service.yaml -f k8s/deployment.yaml
+kubectl -n ai-gateway rollout status deployment/ai-gateway --timeout=120s
+kubectl -n ai-gateway port-forward --address 127.0.0.1 service/ai-gateway 8003:8000
+# In a second terminal:
+curl --fail http://127.0.0.1:8003/health
+```
+
+The app explicitly binds `0.0.0.0:8000`; the ClusterIP Service forwards its port
+8000 to the named container port `http`. Local forwarding uses 8003 to leave the
+existing 8000/8001/8002 examples alone. No hostPort or NodePort is used. To change
+the raw container port, change both the `--port` argument and `containerPort`;
+the Service and probes use the named target. Kubernetes runs its own probes and
+ignores the Dockerfile HEALTHCHECK (which stays fixed at 8000 for Compose).
+
+To remove only the raw application while preserving accounting:
+
+```bash
+kubectl -n ai-gateway delete -f k8s/deployment.yaml -f k8s/service.yaml -f k8s/configmap.yaml
+```
+
+Keep the PVC, namespace, and Secret. Do not use `kubectl delete -f k8s/` or delete
+the namespace to stop the app: those can remove storage. A PVC is persistence,
+not a backup. Take consistent SQLite backups with the app stopped or SQLite's
+backup API; copying an actively written database file alone is not sufficient.
+
+### Deploy with Helm
+
+`charts/ai-gateway` is an application chart. Its schema rejects invalid ports,
+empty Secret names, invalid probe timings, and more than one replica. It also
+rejects environment names containing `KEY`; credentials belong in the existing
+Secret. The chart creates no Secret and never needs your credential values.
+See [Helm chart schema validation](https://helm.sh/docs/topics/charts/#schema-files).
+
+```bash
+helm lint charts/ai-gateway --strict
+helm template ai-gateway charts/ai-gateway --namespace ai-gateway
+# Requires the namespace, existing Secret, and image availability described above:
+helm install ai-gateway charts/ai-gateway --namespace ai-gateway \
+  --set existingSecret=ai-gateway-keys --wait --timeout 2m
+helm upgrade ai-gateway charts/ai-gateway --namespace ai-gateway \
+  --set image.repository=ai-gateway --set-string image.tag=stage5 --wait --timeout 2m
+helm history ai-gateway --namespace ai-gateway
+# Select the desired revision shown by history:
+helm rollback ai-gateway 1 --namespace ai-gateway --wait --timeout 2m
+helm uninstall ai-gateway --namespace ai-gateway
+```
+
+Keep your non-secret overrides in a reviewed values file and pass the same
+`-f my-values.yaml` on install and upgrade so settings remain deliberate.
+Configurable values include image repository/tag/pull policy, existingSecret,
+non-secret `env`, CPU/memory resources, `storage.size`, `storage.storageClassName`,
+`containerPort`, `service.port`, and each probe's timings. For example,
+`--set containerPort=8080,service.port=80` changes the process, named port, Service,
+and probe routing together. Container ports must be unprivileged (1024–65535).
+
+`storage.storageClassName: null` omits the field and selects the cluster default;
+`""` explicitly requests no class (requires a matching pre-provisioned volume).
+Pick the class before installation: PVC class/access modes are immutable. Storage
+expansion requires driver support; never shrink a PVC. Rollback restores manifests
+and the image reference, not SQLite data, keys, or disk size. Every upgrade and
+rollback uses Recreate and can interrupt requests.
+
+The Helm PVC has `helm.sh/resource-policy: keep`; uninstall leaves it and the
+externally managed Secret behind. The claim is `<release>-usage`. Reinstallation
+with the same release and namespace can encounter the retained claim: inspect its
+ownership and data before reuse, and never delete it just to clear an install
+error. A differently named release creates a separate empty database. Keep the
+release name stable when you intend to preserve usage.
+
+### CI flow and local validation
+
+`.github/workflows/ci.yml` runs for pull requests targeting `master` and pushes to
+`master`, the repository's current development branch. Update both filters if the
+branch is renamed. It performs:
+
+1. All Python unit tests using Python 3.13.
+2. Docker build without registry login or image push.
+3. `scripts/ci_container_smoke.py`: 13 checks using generated, disposable mock
+   credentials, unique containers and a fresh named volume, with no published host
+   ports. Checks include authentication, chat, metrics, security settings, SQLite
+   writes, restart, and replacement persistence. Only its newly created containers
+   are stopped. Test containers and storage are retained; no prune or delete runs.
+   Hosted runners discard their own environment after the job.
+4. Checksum-verified Helm 3.19.0 and kubeconform 0.8.0 downloads. Third-party actions
+   are pinned to full commit SHAs; token permissions are only `contents: read`,
+   checkout credentials are not persisted, and no repository secrets are consumed.
+5. Strict Helm lint, default/custom renders, strict Kubernetes 1.34.0 schemas,
+   cross-resource wiring/security assertions, and invalid-value rejection checks.
+   Unknown schemas fail validation. This uses the maintained
+   [kubeconform validator](https://github.com/yannh/kubeconform).
+
+This is CI with deployment preparation. CD to a registry or cluster is deliberately
+not enabled. Fork pull requests receive no deployment credentials. Validation
+needs public downloads; no real AI APIs or cloud services are called.
+
+To repeat locally on Linux amd64 with Python and Docker already available:
+
+```bash
+python3 -m unittest discover -v
+docker build -t ai-gateway:stage5 .
+python3 scripts/ci_container_smoke.py
+bash scripts/install_ci_tools.sh
+# Infrastructure checker only; the application itself still has no pip dependencies.
+# Use an existing environment with PyYAML 6.0.3, or a project-local virtualenv.
+python3 -m venv .venv
+.venv/bin/python -m pip install PyYAML==6.0.3
+.venv/bin/python scripts/validate_infra.py
+```
+
+The original `docker_smoke.py` intentionally operates on Stage 4 Compose and can
+restart/recreate it. CI uses the separate isolated script instead. Run the isolated
+script only when you intend to create new test resources; it reports their volume
+name and retains them. It never touches the existing accounting database.
+
+### Kubernetes troubleshooting
+
+- **Pending PVC/pod:** inspect `kubectl -n ai-gateway get pods,pvc` and
+  `kubectl -n ai-gateway describe pvc ai-gateway-usage`. Verify a default (or selected)
+  CSI StorageClass exists and supports ReadWriteOncePod. Do not weaken access modes
+  to bypass a storage incompatibility.
+- **ImagePullBackOff:** check `kubectl -n ai-gateway describe pod <pod-name>`;
+  confirm the image/tag exists on the nodes or in their approved registry. A local
+  Docker build alone does not load cluster nodes.
+- **CreateContainerConfigError:** the existing Secret name/namespace may be wrong.
+  Inspect the reference and key names without displaying values.
+- **CrashLoopBackOff:** run `kubectl -n ai-gateway logs deployment/ai-gateway --tail=50`
+  (or `--previous`). Check missing/duplicate keys and SQLite permission errors.
+  Verify the CSI driver honors fsGroup 10001 and the volume directory allows
+  SQLite database and journal creation. Do not blindly chown a shared disk.
+- **Service unreachable:** inspect `kubectl -n ai-gateway get service,endpointslices,pods`.
+  Verify readiness, selectors, port arguments, and local port-forward status.
+  ClusterIP is intentionally unreachable directly from outside the cluster.
+- **Probe failures:** use pod events and logs to distinguish slow startup, wrong
+  port, CPU throttling, and OOMKilled. Tune measured resource/probe settings.
+  `/health` returning 200 does not certify database or authenticated request health.
+- **Rollout waits on storage:** check the old pod is terminated and the driver has
+  detached the disk. Recreate downtime is expected; do not force concurrent mounts.
+- **Usage missing:** confirm the same namespace/release/PVC and `/data/usage.sqlite3`
+  path. Provider metrics reset on restart; customer accounting should persist.
+- **Helm upgrade fails:** use `helm status`, `helm history`, and Kubernetes events.
+  Check immutable PVC fields and image availability. Rollback can restore the
+  previous application version but is not a database restore.
+
+### Stage 5 verification in this session
+
+- Existing Python suite: **36 passed, 0 failures**.
+- Helm strict lint: **passed** (only the optional icon recommendation).
+- kubeconform: **17 resource validations passed**, zero invalid/errors/skips:
+  four raw objects, one empty Secret example, and three four-object Helm renders.
+- Deployment policy checks: **4 scenarios passed** (raw, default Helm, custom
+  release/ports/settings, explicit empty storage class).
+- Invalid Helm values: **8 rejected as expected**, including replica counts 0/2,
+  privileged container port, out-of-range Service port, empty Secret, zero probe
+  threshold, API key in env, and zero storage size.
+- Python script compilation and shell syntax checks: **passed**.
+- Docker build: **blocked** by Docker socket permission denied, including the
+  approved escalated attempt. The new 13-check container script is implemented
+  but its runtime checks were **not executed** here. Earlier Stage 4 smoke results
+  do not establish that Stage 5 has passed container checks.
+- No cluster, CSI volume provisioning, actual probes, install/upgrade/rollback,
+  or hosted GitHub Actions execution was verified. Schema/render checks cannot
+  prove those runtime behaviors. No image was pushed or Git commit created.
 
 ## Stage 4: Docker on localhost:8002
 

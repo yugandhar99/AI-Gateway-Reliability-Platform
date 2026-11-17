@@ -1,0 +1,90 @@
+{{- range $key, $value := .Values.env }}
+{{- if contains "KEY" (upper $key) }}{{ fail "env must not contain API keys; use existingSecret" }}{{ end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name | quote }}
+  labels:
+    app.kubernetes.io/name: ai-gateway
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-gateway
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app.kubernetes.io/name: ai-gateway
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: gateway
+        image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        command:
+        - python
+        - -m
+        - gateway.server
+        args:
+        - --host
+        - 0.0.0.0
+        - --port
+        - {{ .Values.containerPort | quote }}
+        - --usage-db
+        - /data/usage.sqlite3
+        ports:
+        - name: http
+          containerPort: {{ .Values.containerPort }}
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-config
+        - secretRef:
+            name: {{ .Values.existingSecret | quote }}
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          {{- toYaml .Values.probes.startup | nindent 10 }}
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          {{- toYaml .Values.probes.readiness | nindent 10 }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          {{- toYaml .Values.probes.liveness | nindent 10 }}
+        volumeMounts:
+        - name: usage
+          mountPath: /data
+      volumes:
+      - name: usage
+        persistentVolumeClaim:
+          claimName: {{ .Release.Name }}-usage
