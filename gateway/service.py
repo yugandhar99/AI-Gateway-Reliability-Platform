@@ -2,8 +2,9 @@
 
 from time import perf_counter
 
-from gateway.providers import PROVIDERS, resolve_provider
+from gateway.providers import PROVIDERS, resolve_provider, simulate_response
 from gateway.reliability import Router
+from gateway.usage import estimate_tokens
 
 DEFAULT_ROUTER = Router()
 
@@ -14,8 +15,7 @@ class ValidationError(ValueError):
     """A client supplied an invalid chat request."""
 
 
-def chat(payload, router=None):
-    started = perf_counter()
+def validate_chat(payload):
     if not isinstance(payload, dict):
         raise ValidationError("Request body must be a JSON object.")
     prompt = payload.get("prompt")
@@ -29,10 +29,32 @@ def chat(payload, router=None):
     provider = resolve_provider(name.strip())
     if provider is None:
         raise ValidationError(f"Unknown provider. Choose one of: {', '.join(PROVIDERS)}.")
-    response, provider = (router or DEFAULT_ROUTER).route(prompt.strip(), provider)
+    return prompt.strip(), provider
+
+
+def chat(payload, router=None):
+    started = perf_counter()
+    prompt, provider = validate_chat(payload)
+    response, provider = (router or DEFAULT_ROUTER).route(prompt, provider)
     return {
         "response": response,
         "provider": provider,
         "status": "success",
         "response_time_ms": round((perf_counter() - started) * 1000, 3),
     }
+
+
+def customer_chat(payload, router, store, customer):
+    """Reserve quota around the unchanged router and settle exactly once."""
+    prompt, _ = validate_chat(payload)
+    input_tokens = estimate_tokens(prompt)
+    reservation = input_tokens + max(
+        estimate_tokens(simulate_response(prompt, provider)) for provider in PROVIDERS)
+    ticket = store.admit(customer, reservation)
+    try:
+        result = chat(payload, router)
+    except Exception:
+        store.finish(ticket)
+        raise
+    store.finish(ticket, input_tokens + estimate_tokens(result["response"]))
+    return result

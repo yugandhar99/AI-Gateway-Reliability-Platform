@@ -2,6 +2,11 @@ import http.client
 import json
 from io import BytesIO
 import unittest
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+from gateway.security import Customer, KeyRegistry
+from gateway.usage import UsageStore
 
 from gateway.server import MAX_BODY_BYTES, GatewayHandler
 
@@ -26,15 +31,21 @@ class QuietHandler(GatewayHandler):
 
 
 class HTTPTests(unittest.TestCase):
-    def request(self, method, path, body=None, headers=None, add_length=True):
+    def request(self, method, path, body=None, headers=None, add_length=True, authenticated=True):
         body = body.encode("utf-8") if isinstance(body, str) else body or b""
         headers = dict(headers or {})
+        if authenticated and "Authorization" not in headers:
+            headers["Authorization"] = "Bearer " + ("test-admin" if path == "/metrics" else "test-starter")
         if add_length and "Content-Length" not in headers:
             headers["Content-Length"] = str(len(body))
         wire = f"{method} {path} HTTP/1.0\r\nHost: localhost\r\n"
         wire += "".join(f"{key}: {value}\r\n" for key, value in headers.items())
         connection = MemoryConnection(wire.encode("ascii") + b"\r\n" + body)
-        QuietHandler(connection, ("127.0.0.1", 12345), None)
+        with TemporaryDirectory(dir=".") as directory:
+            server = getattr(self, "gateway", None) or SimpleNamespace(
+                keys=KeyRegistry({"test-starter": Customer("starter-demo", "Starter")}, "test-admin"),
+                usage_store=UsageStore(directory + "/usage.sqlite3"))
+            QuietHandler(connection, ("127.0.0.1", 12345), server)
         response = http.client.HTTPResponse(MemoryConnection(connection.output.getvalue()))
         response.begin()
         data = response.read()

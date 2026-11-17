@@ -3,16 +3,20 @@
 import argparse
 import json
 import logging
+import sqlite3
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from gateway.providers import PROVIDERS
-from gateway.service import DEFAULT_ROUTER, ValidationError, chat
+from gateway.service import DEFAULT_ROUTER, ValidationError, customer_chat
 from gateway.reliability import AllProvidersFailed, Policy, Router, Simulator
 
+from gateway.security import AuthenticationError, KeyRegistry
+from gateway.usage import LimitExceeded, UsageStore
+
 MAX_BODY_BYTES = 65_536
-ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET"}
+ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET", "/usage": "GET"}
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -28,6 +32,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -42,6 +47,23 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self._error(code, message or HTTPStatus(code).phrase)
 
     def _dispatch(self):
+        try:
+            self._dispatch_authenticated()
+        except AuthenticationError:
+            self._error(401, "Missing or invalid bearer credentials.", {"WWW-Authenticate": "Bearer"})
+        except LimitExceeded as exc:
+            headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+            self._json(429, {"status": "error", "error": str(exc), "code": exc.code}, headers)
+        except sqlite3.Error:
+            self._error(503, "Usage accounting is unavailable. Retry later.")
+
+    def _authenticate(self, admin=False):
+        registry = getattr(self.server, "keys", None)
+        if registry is None:
+            raise AuthenticationError()
+        return registry.authenticate(self.headers, admin=admin)
+
+    def _dispatch_authenticated(self):
         path = urlsplit(self.path).path
         allowed = ROUTES.get(path)
         if allowed is None:
@@ -53,11 +75,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
         elif path == "/providers":
             self._json(200, {"providers": list(PROVIDERS), "simulated": True})
         elif path == "/metrics":
+            self._authenticate(admin=True)
             self._json(200, self._router().metrics())
+        elif path == "/usage":
+            customer = self._authenticate()
+            self._json(200, self.server.usage_store.usage(customer))
         else:
-            self._handle_chat()
+            customer = self._authenticate()
+            self._handle_chat(customer)
 
-    def _handle_chat(self):
+    def _handle_chat(self, customer):
         if self.headers.get("Transfer-Encoding") is not None:
             self._error(400, "Transfer-Encoding is not supported; use Content-Length.")
             return
@@ -85,7 +112,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._error(400, "Request body must be valid UTF-8 JSON.")
             return
         try:
-            result = chat(payload, self._router())
+            result = customer_chat(payload, self._router(), self.server.usage_store, customer)
         except ValidationError as exc:
             self._error(400, str(exc))
             return
@@ -107,9 +134,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _dispatch
 
 
-def create_server(host="127.0.0.1", port=8000, router=None):
+def create_server(host="127.0.0.1", port=8000, router=None, keys=None, usage_store=None):
+    keys = keys if keys is not None else KeyRegistry.from_environment()
+    usage_store = usage_store if usage_store is not None else UsageStore("usage.sqlite3")
     server = ThreadingHTTPServer((host, port), GatewayHandler)
     server.router = router or Router()
+    server.keys = keys
+    server.usage_store = usage_store
     return server
 
 
@@ -119,6 +150,7 @@ def main():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--config", help="JSON provider policies (loaded at startup)")
     parser.add_argument("--simulation-file", help="Live JSON provider outcome sequences")
+    parser.add_argument("--usage-db", default="usage.sqlite3", help="Persistent SQLite accounting file")
     args = parser.parse_args()
     policies = {}
     if args.config:
@@ -131,8 +163,13 @@ def main():
         router = Router(policies, Simulator(args.simulation_file))
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        keys = KeyRegistry.from_environment()
+        usage_store = UsageStore(args.usage_db)
+    except (ValueError, sqlite3.Error) as exc:
+        parser.error(str(exc))
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    with create_server(args.host, args.port, router) as server:
+    with create_server(args.host, args.port, router, keys, usage_store) as server:
         print(f"AI gateway listening on http://{args.host}:{server.server_port}", flush=True)
         try:
             server.serve_forever()
