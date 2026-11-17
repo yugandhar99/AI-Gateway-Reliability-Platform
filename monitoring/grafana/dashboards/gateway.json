@@ -2,7 +2,7 @@
   "uid": "ai-gateway",
   "title": "AI Gateway Reliability",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "15s",
   "time": {
     "from": "now-15m",
@@ -257,6 +257,93 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "title": "Active incidents by severity",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_incidents_active",
+          "refId": "A",
+          "legendFormat": "{{severity}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Resolved incidents",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_incidents_resolved_total",
+          "refId": "A",
+          "legendFormat": "Resolved"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Human remediation approvals",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 40,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_incident_approvals_total",
+          "refId": "A",
+          "legendFormat": "Approvals"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
         },
         "overrides": []
       }

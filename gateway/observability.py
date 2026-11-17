@@ -1,13 +1,18 @@
 """Bounded, process-local Prometheus text metrics; no user-controlled labels."""
-from collections import Counter
+from collections import Counter, deque
 from threading import Lock
+from time import time
+import math
 
 
 class Metrics:
     buckets = (.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10)
 
-    def __init__(self):
+    def __init__(self, clock=time):
         self.lock = Lock()
+        self.clock = clock
+        self.recent = deque(maxlen=10000)
+        self.incidents = None
         self.requests = Counter()
         self.latency = Counter()
         self.events = Counter()
@@ -15,11 +20,22 @@ class Metrics:
 
     def observe(self, route, method, status, elapsed):
         with self.lock:
+            if route == "/chat":
+                self.recent.append((self.clock(), int(status), elapsed))
             self.requests[route, method, str(status)] += 1
             self.latency[route, 'count'] += 1
             self.latency[route, 'sum'] += elapsed
             for bound in self.buckets:
                 self.latency[route, str(bound)] += elapsed <= bound
+
+    def window(self, since=None):
+        cutoff = max(self.clock() - 60, since if since is not None else float('-inf'))
+        with self.lock:
+            rows = [(status, elapsed) for at, status, elapsed in self.recent if at >= cutoff]
+        durations = sorted(elapsed for _, elapsed in rows)
+        return {'requests':len(rows),
+                'error_rate':sum(status >= 500 for status, _ in rows) / len(rows) if rows else 0,
+                'p95_seconds':durations[max(0, math.ceil(.95 * len(rows))-1)] if rows else 0}
 
     def event(self, event, provider):
         if event not in ('provider_failure', 'retry', 'failover'):
@@ -67,4 +83,13 @@ class Metrics:
         for provider, health in snapshot.items():
             for state in ('CLOSED', 'OPEN', 'HALF_OPEN'):
                 sample('circuit_breaker_state', int(health['state'] == state), provider=provider, state=state)
+        if self.incidents is not None:
+            counts, resolved, approvals = self.incidents.metrics()
+            family('incidents_active', 'gauge', 'Active correlated incidents by severity.')
+            for severity, count in counts.items():
+                sample('incidents_active', count, severity=severity)
+            family('incidents_resolved_total', 'counter', 'Persisted resolved incidents.')
+            sample('incidents_resolved_total', resolved)
+            family('incident_approvals_total', 'counter', 'Persisted human remediation approvals.')
+            sample('incident_approvals_total', approvals)
         return ('\n'.join(lines) + '\n').encode('utf-8')

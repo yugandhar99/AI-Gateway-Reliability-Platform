@@ -40,6 +40,8 @@ def main():
     scraper = (ROOT / 'secrets/monitoring/metrics').read_text().strip()
     metrics = get('http://127.0.0.1:8003/metrics/prometheus', scraper)
     assert 'gateway_tokens_total' in metrics
+    for metric in ('gateway_incidents_active', 'gateway_incidents_resolved_total', 'gateway_incident_approvals_total'):
+        assert metric in metrics
     import subprocess
     subprocess.run(['docker', 'compose', '--env-file', '.env.monitoring', '-f',
                     'compose.monitoring.yaml', 'exec', '-T', 'prometheus',
@@ -63,8 +65,9 @@ def main():
             if path.endswith('/health'):
                 assert result['status'] == 'OK'
             else:
-                assert len(result['dashboard']['panels']) >= 6
-    print('PASS: authenticated metrics, Prometheus scrape, provisioned Grafana dashboard and data source')
+                assert len(result['dashboard']['panels']) >= 12
+                assert {10,11,12} <= {panel['id'] for panel in result['dashboard']['panels']}
+    print('PASS: authenticated metrics, Prometheus scrape, incident metrics, provisioned Grafana dashboard and data source')
 
 
 if __name__ == '__main__':

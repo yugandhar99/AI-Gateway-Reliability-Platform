@@ -1,9 +1,304 @@
 # AI Model Gateway & Reliability Platform
 
-Stage 6 adds local Prometheus and Grafana observability to the containerized
+Stage 7 adds deterministic AIOps and administrator-approved incident management to the
 HTTP API that simulates OpenAI, Anthropic, and Gemini.
 It uses only the Python standard library. No real provider API keys, paid services, package
 installation, or external API calls are needed. Local demo bearer keys are required. Python 3.10+ is recommended.
+
+## Stage 7: AIOps and automated incident management
+
+Stage 7 uses the existing process-local request histogram/counters and router health
+snapshot. There is no LLM, real provider call, shell remediation, Docker integration,
+new Python dependency, or Kubernetes installation. Existing API routes and Stage 6
+Prometheus/Grafana services remain available. Incident execution always requires an
+explicit authenticated administrator approval; detection alone never remediates.
+
+### Architecture and detection rules
+
+```text
+/chat completion + authenticated Prometheus scrape + POST /incidents/evaluate
+    -> 60-second bounded chat evidence + provider/circuit health snapshot
+    -> deterministic detection / service-level correlation / severity / analysis
+    -> SQLite incidents + approvals + append-only application audit events
+    -> administrator reviews recommendations -> approves one action
+    -> separate execute request -> allowlisted mock action -> verifying
+    -> fresh successful chat metrics + healthy provider circuits -> resolved
+```
+
+`gateway/incidents.py` owns the engine and SQLite lifecycle. The tables
+`incidents`, `incident_approvals`, and `incident_audit` share the configured usage
+database, preserving the existing persistent volume. `UsageStore` migrates older
+accounting databases by adding nullable process-owner columns. Legacy rows remain
+intact. Metrics use at most 10,000 recent chat samples and a rolling 60-second
+window. These samples are in memory and reset on process restart; incident history
+and audit evidence persist. No prompts, customer identifiers, or credentials enter
+incident evidence or incident metric labels.
+
+| Signal | Rule |
+| --- | --- |
+| Elevated errors | At least five chat responses in the window and more than 10% HTTP 5xx |
+| Latency spike | At least five chat responses and nearest-rank P95 above 0.5 seconds |
+| Provider outage/degradation | A provider has consecutive failures or its circuit is not CLOSED |
+| Open circuit | Router state is OPEN; correlated with the provider failure, not a second incident |
+
+P1 means all three providers are unavailable, or at least 50% chat server errors
+without provider failure evidence. P2 means degraded provider redundancy or an
+elevated error rate. P3 means a latency spike without those higher-severity signals.
+Analysis prioritizes provider evidence, then HTTP errors, then latency. It reports
+an evidence-based likely cause, not proof of an external infrastructure failure.
+Numeric request/error/latency evidence and fixed provider error categories are
+stored with the summary for administrator inspection.
+
+A partial unique SQLite index enforces **one active routing incident for this
+single mock gateway**, even across concurrent evaluations. Related error, latency,
+provider, and circuit symptoms update that incident. Material evidence changes
+increment its revision and invalidate earlier approvals. After resolution, a new
+outage creates a new incident. This intentionally broad correlation does not model
+separate customer incidents or distributed causal graphs. Detection runs on chat
+completion, authenticated Prometheus scrapes, and administrator evaluation; it
+cannot detect a stopped gateway process from inside that process. Stage 6's
+external `GatewayDown` alert continues to cover scrape loss.
+
+### Approval, actions, recovery, and accounting safeguards
+
+The administrator key is the approval identity. Customer and metrics keys cannot
+list incidents, inspect recommendations, approve, execute, or verify. Approval and
+execution are separate endpoints. An approval binds one action to one incident
+revision, expires after 300 seconds, and can be claimed only once. Unknown actions,
+missing/stale/expired approvals, and replay attempts return HTTP 409. The API trusts
+an authenticated administrator's approval as the human decision; it does not add
+MFA or a separate human identity provider.
+
+Only these fixed Python operations are executable:
+
+- `probe_providers`: fixed mock requests through normal router/circuit cooldowns.
+  It never force-closes a circuit and does not bill a customer.
+- `restore_mock_providers`: available only with `--enable-mock-remediation` (or the
+  isolated demo). Sets the built-in simulator to process-local success outcomes,
+  then probes through normal routing. It preserves scenario files. The override
+  lasts until this application process exits; it does not repair an external service.
+- `reconcile_reservations`: releases pending reservations older than 300 seconds
+  only when the recorded owner is provably exited in the same host/boot/PID
+  namespace, or its PID has been reused with a different process start identity.
+  Living owners are skipped regardless of age, so slow active requests can still
+  settle normally. Unknown owners, unreadable/ambiguous liveness, legacy rows,
+  and other namespaces/hosts are skipped. Reconciliation is atomic and idempotent;
+  it marks orphan reservations failed, releases reserved quota, and never deletes
+  history or changes already settled tokens. It requires the same administrator
+  approval and execution flow. Age alone is never permission to reclaim quota.
+
+Execution is durably claimed and audited before side effects. Failures are audited,
+consume that approval, and require a new approval to retry. A process interrupted
+between claim and completion leaves an `executing` record for operator investigation;
+it is deliberately never replayed automatically. There is no automatic restart,
+container deletion, arbitrary command/path, policy rewrite, or circuit reset action.
+
+An action moves the incident to `verifying`, not directly to `resolved`.
+`POST /incidents/verify` requires healthy provider circuits, no current detection
+symptoms, and at least five fresh post-action chat observations with zero 5xx and
+P95 at most 0.5 seconds. A liveness check alone cannot resolve an incident. Old
+failures must age out of the 60-second window. Pending/failed verification is audited;
+recovery can be checked again or a new action explicitly approved. The standalone
+demo additionally checks the actual HTTP `/health` endpoint.
+
+Audit events cover detection, material evidence changes, approval, execution claim,
+execution success/failure, and recovery checks. They are application-append-only,
+not cryptographically tamper-proof against a local database administrator. Incident
+lists return the newest 100 entries; individual IDs expose full evidence and audit.
+SQLite failures produce a sanitized HTTP 503; post-chat detection persistence errors
+are logged without private values and do not change an already completed chat response.
+
+### Administrator endpoints
+
+All endpoints require the existing admin bearer key; POST bodies require JSON.
+Body-supplied metric evidence, arbitrary commands, and extra action arguments are
+rejected. IDs must be positive integers.
+
+| Method and path | Body / result |
+| --- | --- |
+| `GET /incidents` | Latest incidents and evidence |
+| `GET /incidents?id=1` | Incident details, approval history, audit events |
+| `GET /incidents/recommendations?id=1` | Fixed recommendations permitted for that incident |
+| `POST /incidents/evaluate` | `{}`; evaluate current server-owned evidence |
+| `POST /incidents/approve` | `{"incident_id":1,"action":"probe_providers"}`; returns `approval_id` |
+| `POST /incidents/execute` | `{"incident_id":1,"approval_id":1}`; consume approval and execute |
+| `POST /incidents/verify` | `{"incident_id":1}`; returns `recovered`, current and fresh evidence |
+
+### Exact commands: detection through recovery
+
+Run from this repository. The demo starts its own ephemeral loopback HTTP server,
+creates random credentials only in memory, and keeps an independent SQLite audit
+database in a **new** ignored directory. It neither connects to nor modifies the
+existing gateway, Prometheus, Grafana, Docker, or their scenario files.
+
+```bash
+cd ~/projects/ai-platform-mock
+python3 -m unittest discover -v
+python3 -m compileall -q gateway scripts tests
+python3 scripts/validate_incident_dashboard.py
+
+# Detect an outage and prove execution without approval is rejected; no remediation.
+python3 scripts/simulate_incident.py --directory monitoring/runtime/stage7-detect
+
+# Full human-approved flow using a separate, new database and ephemeral server.
+python3 scripts/simulate_incident.py --interactive --directory monitoring/runtime/stage7-review
+```
+
+For the interactive run, inspect the P1 summary and recommendations. At the prompt,
+type `APPROVE` to authorize `restore_mock_providers` for this isolated demo. Any
+other answer exits without approval or execution. The script calls approve, waits
+six seconds for circuit cooldown, calls execute, demonstrates that immediate
+verification is still pending, then waits 61 seconds for the old failure window to
+clear. It checks `/health`, sends five successful chats, verifies recovery, and
+proves that replaying the approval is rejected. Expect `RECOVERED` and `PASS`.
+The script stops only its own server in `finally` and prints the relative audit
+SQLite path. Choose another new directory on subsequent runs; existing history is
+never overwritten. No approval can be supplied via a command-line bypass flag.
+
+To inspect the preserved history without reading secrets:
+
+```bash
+python3 - <<'PYCODE'
+import sqlite3
+with sqlite3.connect('monitoring/runtime/stage7-review/incidents.sqlite3') as db:
+    print(db.execute('SELECT id,severity,status,summary FROM incidents').fetchall())
+    print(db.execute('SELECT incident_id,actor,event FROM incident_audit ORDER BY id').fetchall())
+PYCODE
+```
+
+For targeted regression checks:
+
+```bash
+python3 -m unittest tests.test_incidents -v
+python3 scripts/validate_infra.py  # validates files only; may download JSON schemas
+```
+
+The existing CI runs the complete unit suite (including approved recovery and
+failure scenarios with fixture administrator decisions), compile/dashboard checks,
+and an isolated **detection-only** HTTP demo. No CI human remediation approval is
+fabricated for a running service. Existing container, monitoring, and infrastructure
+checks remain in the workflow.
+
+### Actual Stage 7 verification
+
+The completion pass ran **62 Python unit tests successfully** (42 existing tests
+plus 20 incident tests). These include full HTTP request/response lifecycle recovery,
+authorization, correlation under concurrency, approval expiry/replay/revision changes,
+remediation failure and interrupted execution, real exited-process reconciliation,
+and an active blocked request that survives reconciliation and settles successfully.
+Compile checks, dashboard validation (12 panels), and `git diff --check` passed.
+The isolated detection-only demo also passed against a real ephemeral HTTP server.
+The operator confirmed that the interactive demo passed human approval,
+remediation, recovery verification, replay rejection, and persistent audit history.
+The final completion pass independently reran the full suite on Python 3.14.4
+(62 tests in 8.791 seconds) and the isolated detection-only HTTP demo. The latter
+needed permission to bind its ephemeral loopback socket outside the sandbox.
+
+The earlier Stage 7 verification using Prometheus v3.7.3 `promtool` passed configuration syntax, all three existing alert
+rules, healthy/firing alert fixtures, and exporter format including incident metrics.
+The final infrastructure validator rerun passed Helm lint, 17 schema-valid resources,
+four policy scenarios, and eight rejected invalid overrides; it installed no cluster.
+Public schema downloads required network permission outside the sandbox.
+Intended source and all existing Git revisions were checked in memory against
+current local monitoring credential values; none were present. Sixteen sensitive
+path exclusion checks passed, and no credential or runtime database paths were
+tracked. The Docker context retains its application-source-only allowlist.
+No Docker build/container smoke was rerun, no Docker socket was accessed, and no
+running container was recreated. These reviewed Stage 7 files are included in the
+completion commit. Remote CI results and deployed Stage 7 Grafana integration remain
+unverified until the committed source is built and deployed. The real Hellyeah
+interview folder was not modified. The promtool checks were not rerun in the final
+completion pass.
+
+### Monitoring and deployment boundaries
+
+Three additional dashboard panels show `gateway_incidents_active{severity}`,
+`gateway_incidents_resolved_total`, and `gateway_incident_approvals_total`. Active
+counts include open, executing, and verifying incidents; totals use persisted
+SQLite history. They have no incident/customer ID labels. The existing nine panels
+and Prometheus alert rules remain. Incident evidence uses the gateway's 60-second
+window; Stage 6 Prometheus alert rules retain their own longer windows and timing.
+
+No running containers were rebuilt/restarted to deploy this change. A running
+Stage 6 gateway keeps its previous code until you choose to deploy the reviewed
+source; its incident metrics will be absent until then. The isolated demo exercises
+Stage 7 without that deployment. The Compose command intentionally does not opt
+into mock overrides: normal provider probes and safe reconciliation are available,
+while mock restoration needs an explicit server flag in a separately reviewed run.
+Local credentials, `.env.monitoring`, runtime databases and sidecars remain ignored
+by Git and excluded by the existing Docker application-source allowlist.
+
+### Complete project architecture
+
+| Layer | Files and responsibility |
+| --- | --- |
+| HTTP adapter | `gateway/server.py`: bounded JSON parsing, HTTP routes, authentication gates, sanitized errors, request observations, incident integration |
+| Service and providers | `gateway/service.py`, `gateway/providers.py`: input validation, simulated responses, request timing, quota reservation and settlement |
+| Reliability | `gateway/reliability.py`: deterministic file-driven simulation, provider policies, bounded retries, ordered failover, thread-safe CLOSED/OPEN/HALF_OPEN circuits |
+| Identity | `gateway/security.py`: distinct customer/admin/metrics roles, environment or mounted-file credentials, hashed constant-time comparisons, fixed customer tiers |
+| Accounting | `gateway/usage.py`: transactional SQLite rate limits, monthly token reservations, estimated cost, settlement, conservative orphan reconciliation |
+| Telemetry | `gateway/observability.py`: bounded request evidence, histograms/counters, fixed-label Prometheus exporter; administrator JSON router metrics remain available |
+| AIOps | `gateway/incidents.py`: deterministic detection, P1/P2/P3 correlation, recommendations, revision-bound expiring approvals, single-use execution, recovery verification, persistent audit |
+| Monitoring | `monitoring/`: Prometheus scrape configuration, three alert rules and fixtures, Grafana provisioning and 12-panel dashboard |
+| Packaging | `Dockerfile`, Compose files: non-root application container, persistent SQLite volume, separate localhost monitoring stack with mounted secrets |
+| Cluster deployment | `k8s/`, `charts/ai-gateway/`: one replica, Recreate updates, retained storage, existing Secret, probes, resource limits, restricted security context |
+| Validation | `tests/`, `scripts/`, `.github/workflows/ci.yml`: 62 unit tests, isolated demos, infrastructure/dashboard checks, image/container and monitoring checks in CI |
+
+Request flow is authentication, validation, atomic admission, provider routing,
+accounting settlement, response observation, and incident evaluation. Provider
+calls run outside SQLite transactions. Prometheus scrapes authenticated metrics
+every 15 seconds; Grafana queries Prometheus. Usage, approvals, incidents, and
+audit persist together in SQLite. Circuit state, counters, and recent request
+samples are process-local. Only one application replica is supported.
+
+### Final deployment instructions (operator-run)
+
+The completion review does not deploy or change any running container. Run the
+following later in an authorized deployment window from this repository. Preserve
+existing credentials, named volumes, and runtime directories; take a consistent
+SQLite backup using the backup API or your approved stopped-application procedure
+before the additive schema migration. Do not remove volumes to deploy or roll back.
+
+For the existing Compose monitoring installation, retain project name
+`ai-gateway-stage6` and its existing usage volume. The historical `stage6` image
+tag remains configured, but the build uses the committed Stage 7 source:
+
+```bash
+python3 -m unittest discover -v
+python3 scripts/validate_incident_dashboard.py
+# On a fresh installation only; preserves existing keys if already initialized:
+python3 scripts/setup_monitoring.py
+docker compose --env-file .env.monitoring -f compose.monitoring.yaml config --quiet
+docker compose --env-file .env.monitoring -f compose.monitoring.yaml up -d --build
+curl --fail http://127.0.0.1:8003/health
+python3 scripts/check_monitoring.py
+```
+
+The `up` command can recreate services and belongs only in that later deployment
+window. Confirm the Prometheus target is UP and Grafana shows all 12 panels at
+`http://127.0.0.1:3000/d/ai-gateway`. Use the existing private credentials through
+your secure client to inspect administrator incident endpoints; do not print keys
+or expanded Compose configuration. Do not inject failure traffic into the deployed
+service for this review. The isolated interactive script remains the recovery demo.
+Mock restoration stays disabled in the normal Compose and Kubernetes deployment.
+
+For Kubernetes, follow the Stage 5 namespace/Secret/storage prerequisites below,
+build and publish or load the committed source as an immutable image through your
+approved registry process, then choose Helm or raw manifests. For Helm:
+
+```bash
+helm upgrade --install ai-gateway charts/ai-gateway --namespace ai-gateway \
+  -f reviewed-values.yaml --wait --timeout 2m
+kubectl -n ai-gateway rollout status deployment/ai-gateway --timeout=120s
+```
+
+Set the approved image repository/tag, existing Secret, and storage settings in
+the non-secret reviewed values file. Preserve the existing claim and single
+replica/Recreate strategy. Kubernetes monitoring installation is separate; the
+Compose Grafana/Prometheus stack is not installed by this chart. On rollback,
+restore the previously approved image and configuration while retaining SQLite;
+the schema additions are nullable columns and new tables. Verify health, usage,
+and retained audit history after either deployment or rollback.
 
 ## Stage 6: Prometheus and Grafana
 

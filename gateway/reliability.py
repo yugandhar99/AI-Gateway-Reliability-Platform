@@ -63,13 +63,19 @@ class Simulator:
         self.path = path
         self.sleeper = sleeper
         self.lock = Lock()
+        self.restored = False
         self.previous = None
         self.positions = {}
+
+    def restore_mock(self):
+        """Explicitly approved, process-local mock override; never modifies files."""
+        with self.lock:
+            self.restored = True
 
     def __call__(self, provider, prompt, timeout):
         with self.lock:
             try:
-                if self.path:
+                if self.path and not self.restored:
                     with open(self.path, encoding="utf-8") as source:
                         config = json.load(source)
                 else:

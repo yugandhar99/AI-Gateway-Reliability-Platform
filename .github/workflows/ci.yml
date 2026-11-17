@@ -22,6 +22,12 @@ jobs:
           python-version: '3.13'
       - name: Python unit tests
         run: python -m unittest discover -v
+      - name: Compile Python and validate Stage 7 monitoring panels
+        run: |
+          python -m compileall -q gateway scripts tests
+          python scripts/validate_incident_dashboard.py
+      - name: Isolated Stage 7 detection and approval guard (no remediation)
+        run: python scripts/simulate_incident.py --directory monitoring/runtime/ci-stage7
       - name: Build image (no push)
         run: docker build --tag ai-gateway:stage5 .
       - name: Isolated container smoke checks

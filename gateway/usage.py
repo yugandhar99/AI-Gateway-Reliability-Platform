@@ -3,6 +3,8 @@
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import math
+import os
+from pathlib import Path
 import sqlite3
 from time import time
 
@@ -24,6 +26,7 @@ class LimitExceeded(Exception):
 class UsageStore:
     def __init__(self, path, clock=time):
         self.path, self.clock = str(path), clock
+        self.owner = self.process_identity()
         with self.connection() as db:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS requests (
@@ -38,6 +41,53 @@ class UsageStore:
                 CREATE INDEX IF NOT EXISTS requests_customer_time ON requests(customer, admitted);
                 CREATE INDEX IF NOT EXISTS requests_customer_month ON requests(customer, month);
             ''')
+            db.execute('BEGIN IMMEDIATE')
+            columns = {r[1] for r in db.execute('PRAGMA table_info(requests)')}
+            for name, kind in [('owner_pid','INTEGER'),('owner_start','TEXT'),('owner_scope','TEXT')]:
+                if name not in columns:
+                    db.execute(f'ALTER TABLE requests ADD COLUMN {name} {kind}')
+
+    @staticmethod
+    def process_identity(pid=None):
+        # Conservative same-host, same-boot, same-PID-namespace proof. Unknown
+        # environments and legacy rows are never eligible for reclamation.
+        pid = os.getpid() if pid is None else pid
+        try:
+            start = Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[19]
+            scope = (Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':'
+                     + os.readlink('/proc/self/ns/pid') + ':' + os.uname().nodename)
+            return pid, start, scope
+        except (OSError, IndexError):
+            return pid, None, None
+
+    def reconcile_stale(self, minimum_age=300):
+        if not isinstance(minimum_age, (int,float)) or not math.isfinite(minimum_age) or minimum_age < 300:
+            raise ValueError('Minimum stale age is 300 seconds')
+        released = skipped = 0
+        with self.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute("SELECT id,owner_pid,owner_start,owner_scope FROM requests WHERE status='pending' AND admitted<?",
+                              (self.clock()-minimum_age,)).fetchall()
+            for ident,pid,start,scope in rows:
+                if not pid or not start or not scope or scope != self.owner[2]:
+                    skipped += 1
+                    continue
+                current = self.process_identity(pid)
+                # Missing/unreadable process metadata alone is not evidence of exit.
+                dead = (current[1] is not None and current[1] != start)
+                if current[1] is None:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        dead = True
+                    except (PermissionError, OSError):
+                        dead = False
+                if not dead:
+                    skipped += 1
+                    continue
+                db.execute("UPDATE requests SET status='failed',reserved=0 WHERE id=? AND status='pending'",(ident,))
+                released += 1
+        return {'released':released,'skipped':skipped}
 
     @contextmanager
     def connection(self):
@@ -69,8 +119,8 @@ class UsageStore:
             if used + reservation > tier.monthly_tokens:
                 raise LimitExceeded('quota_exhausted',
                                     'Monthly token quota cannot cover this request. Try a shorter prompt or wait for the next UTC month.')
-            return db.execute('INSERT INTO requests(customer,month,admitted,reserved) VALUES (?,?,?,?)',
-                              (customer.customer_id, month, now, reservation)).lastrowid
+            return db.execute('INSERT INTO requests(customer,month,admitted,reserved,owner_pid,owner_start,owner_scope) VALUES (?,?,?,?,?,?,?)',
+                              (customer.customer_id, month, now, reservation, *self.process_identity())).lastrowid
 
     def finish(self, request_id, tokens=None):
         with self.connection() as db:
