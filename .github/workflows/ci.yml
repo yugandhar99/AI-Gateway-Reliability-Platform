@@ -48,9 +48,12 @@ jobs:
           docker run --rm --entrypoint promtool -v "$PWD/monitoring:/etc/prometheus:ro" -w /etc/prometheus prom/prometheus:v3.7.3 check rules alerts.yml
           docker run --rm --entrypoint promtool -v "$PWD/monitoring:/etc/prometheus:ro" -w /etc/prometheus prom/prometheus:v3.7.3 test rules alerts.test.yml
       - name: Start monitoring stack
-        run: docker compose --env-file .env.monitoring -f compose.monitoring.yaml up -d --build
+        run: docker compose --env-file .env.monitoring -f compose.monitoring.yaml up -d --build --wait --wait-timeout 120
       - name: Verify monitoring integration
         run: python scripts/check_monitoring.py
+      - name: Safe monitoring startup diagnostics
+        if: failure()
+        run: python scripts/check_monitoring.py --diagnostics
       - name: Stop only monitoring services (retain data)
         if: always()
         run: docker compose --env-file .env.monitoring -f compose.monitoring.yaml stop
