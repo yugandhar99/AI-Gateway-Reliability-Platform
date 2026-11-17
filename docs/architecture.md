@@ -101,3 +101,38 @@ keys are retained indefinitely. Capacity bounds active jobs, while database
 size grows with request history. The dead-letter queue is a durable terminal
 state retrievable through the same tenant job endpoints. There is no replay
 endpoint. To rerun a dead letter, submit with a fresh idempotency key.
+
+### Submission and settlement
+
+```mermaid
+sequenceDiagram
+    participant C as Customer
+    participant A as HTTP API
+    participant D as SQLite queue and ledger
+    participant W as Worker
+    participant R as Provider router
+    C->>A: POST /jobs with bearer and idempotency key
+    A->>D: Check replay, capacity and quota
+    alt New job admitted
+        D-->>A: Commit job and reservation
+        A-->>C: 202 with Location
+    else Matching replay
+        D-->>A: Original job metadata
+        A-->>C: 200 with Location
+    else Queue at capacity
+        A-->>C: 429 with Retry-After
+    end
+    W->>D: Claim next eligible job and receive lease token
+    W->>R: Execute a simulated attempt
+    W->>D: Renew lease while attempt runs
+    R-->>W: Result or failure
+    W->>D: Verify live token and settle or reschedule
+    C->>A: GET job result
+    A->>D: Read tenant-scoped state
+    A-->>C: 200 result, 202 pending, or 409 terminal failure
+```
+
+A supervisor replaces a worker thread that exits. Its abandoned claim
+remains running until expiry and polling recovery. Recovery writes a durable
+transition and either reschedules the job or releases the reservation into
+dead letter. A worker using the expired claim cannot publish a late outcome.

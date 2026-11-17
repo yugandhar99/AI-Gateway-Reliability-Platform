@@ -1,6 +1,6 @@
 # Final engineering review
 
-Reviewed application revision `e139b8db9dd135ebc5ab5491d0b6f0a9189d0ee5` in the advanced mock checkout. The repository’s README, API, architecture, deployment guide, and inference runbook supply the requirements baseline available for this review. The implementation meets the tested single-host, simulated-provider requirements. Production exposure and multi-host scaling remain outside that validation.
+Reviewed application revision `e139b8db9dd135ebc5ab5491d0b6f0a9189d0ee5` in the local checkout. The repository’s README, API, architecture, deployment guide, and inference runbook supply the requirements baseline available for this review. The implementation meets the tested single-host, simulated-provider requirements. Production exposure and multi-host scaling remain outside that validation.
 
 ## Implemented requirements
 
@@ -58,7 +58,7 @@ Live Grafana and Kubernetes deployments, real providers, sustained load, and hos
 
 ## Exact application startup commands
 
-From the advanced checkout root, run in Bash with Python 3.10 or later. These commands use disposable demo credentials and a fresh loopback-only instance.
+From the repository root, run in Bash with Python 3.10 or later. These commands use disposable demo credentials and a fresh loopback-only instance.
 
 ```bash
 mkdir -p tmp
@@ -93,4 +93,4 @@ The Compose service binds to `http://127.0.0.1:8002`, stores SQLite data in a na
 
 The review began on `master` with a clean worktree and 11 reachable commits. `e139b8d` implements asynchronous inference on top of the seven staged gateway commits and subsequent CI and portfolio changes. No remotes were configured. `git fsck --full` reported no integrity errors and one pre-existing dangling blob. `git ls-files -ci --exclude-standard` found no tracked paths matching ignore rules. The [publication audit](docs/publication-audit.md) records historical private context and author metadata that remain in the local history.
 
-The review change is this report in the advanced checkout. No source changes, history rewrite, remote operations, or changes to the original project were made.
+The review was recorded in this report. No source changes, history rewrite, remote operations, or changes to the original project were made.

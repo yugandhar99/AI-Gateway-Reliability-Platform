@@ -23,22 +23,45 @@ docker run --rm --name portfolio-browser-review --user "$(id -u):$(id -g)" \
 
 Then run `.venv-screenshots/bin/python scripts/capture_screenshots.py --browser-ws ws://127.0.0.1:9323/`. The connection exposes loopback service access to this trusted local browser. Stop it afterward with `docker stop portfolio-browser-review`; it receives no repository or Docker socket mount.
 
-The script runs headless Chromium through Python Playwright with an explicit `en-US` locale, avoiding invalid host locale tags in Grafana. Use `--reuse-traffic` to capture existing telemetry after an earlier simulation run; the manifest records this choice. It waits for baseline scrapes, invokes the existing traffic simulator with 20 requests per phase, restores the original scenario through that simulator's `finally` block, and waits for recovery scrapes. This updates local metrics, usage accounting and incident records. It does not execute remediation or change application code.
+The script runs headless Chromium through Python Playwright with an explicit `en-US` locale, avoiding invalid host locale tags in Grafana. Use `--reuse-traffic` to capture existing telemetry after an earlier simulation run; the manifest records this choice. It waits for baseline scrapes, invokes the existing traffic simulator with 20 requests per phase, restores the original scenario through that simulator's `finally` block, submits five asynchronous jobs, and verifies their results after recovery scrapes. This updates local metrics, usage accounting and incident records. It does not execute remediation or change application code.
 
-Outputs are written here:
+Capture automation writes its outputs under `docs/screenshots/v2/`.
 
 | File | Evidence |
 |---|---|
-| `grafana-dashboard.png` | Actual authenticated Grafana dashboard with all twelve panel titles checked before capture |
+| `grafana-dashboard.png` | Actual authenticated Grafana dashboard with all eighteen panel titles checked before capture |
 | `prometheus-targets.png` | Actual Prometheus targets page; gateway scrape must be UP |
 | `prometheus-alerts.png` | Actual Prometheus alert rules and current state |
 | `gateway-health.png` | Actual gateway `/health` response |
 | `docker-health.png` | HTML report rendered by Chromium using narrowly selected live Docker state fields |
-| `github-actions.png` | Optional public workflow run verified successful using GitHub's API |
+| `github-actions.png` | Optional successful public workflow run for the clean capture revision |
 | `capture.json` | Capture start time, source revision, dirty-tree flag, scenario, captured files, SHA-256 image digests, browser transport and actual container state |
 
-GitHub capture uses a fresh browser context without account credentials or saved login state. If the public API or run page is inaccessible, it records the omission and integrates only the other verified captures. Use `--skip-github` to omit the attempt. An older PNG may remain after a rerun, but only images recorded in the current manifest are integrated into README.
+GitHub capture uses a fresh browser context without account credentials or saved login state. If the public API or run page is inaccessible or the successful run belongs to a different revision, it records the omission and integrates only the other verified captures. Use `--skip-github` to omit the attempt. The generated README gallery uses the images listed in the latest manifest.
 
 README image blocks and descriptions are generated only after all five required local captures succeed. The script refuses images when known local secret values appear in visible text; it never stores authentication state, credentials, request traces, raw Docker configuration, or container logs. Grafana login uses an ephemeral context cookie scoped to its loopback origin; no login form is captured. The health response uses larger browser text for readability. Review image pixels and repository changes before committing. No commit, push, or publication is performed.
 
 If a capture fails, check service readiness and browser dependencies privately, then rerun. Partial PNG files can exist after failure; the README is not updated by a failed run. A zero approval count, inactive alerts, or missing Docker health check must not be interpreted as an error or relabeled healthy. These captures demonstrate a local simulation, not cloud deployment, real provider inference or production readiness.
+
+## Historical gallery
+
+The [v1-era capture manifest](capture.json) records the source revision,
+workload, and hashes for the historical images below. Its GitHub Actions
+image belongs to the recorded prior revision.
+
+- [12-panel Grafana dashboard](grafana-dashboard.png)
+- [Prometheus targets](prometheus-targets.png) and [alert rules](prometheus-alerts.png)
+- [Gateway health](gateway-health.png) and [Docker state](docker-health.png)
+- [Historical GitHub Actions run](github-actions.png)
+
+## Version 2.0 publication capture
+
+The publication capture used a separate Compose project with disposable
+credentials and storage, ephemeral loopback ports, and five gateway
+workers. Headless Chromium captured the full dashboard and both
+Prometheus views after synthetic chat and job traffic. The
+[capture manifest](v2/capture.json) records the gateway revision,
+dashboard hash, workload, query checks, and image hashes.
+
+- [18-panel Grafana dashboard](v2/grafana-dashboard.png)
+- [Prometheus targets](v2/prometheus-targets.png) and [alert rules](v2/prometheus-alerts.png)

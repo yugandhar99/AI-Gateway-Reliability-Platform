@@ -6,7 +6,6 @@ Run these commands from the project root in Bash. They use local demo
 credentials and a disposable database inside the checkout.
 
 ```bash
-cd ~/projects/ai-gateway-advanced-mock
 mkdir -p "$PWD/tmp"
 run_dir=$(mktemp -d "$PWD/tmp/inference-demo.XXXXXX")
 printf '{}\n' > "$run_dir/providers.json"
@@ -105,8 +104,9 @@ remains readable after restarting the gateway against the same database.
   restarts if lease expiration rises. After correcting the cause, submit
   a new job with a fresh idempotency key for any dead-lettered work
   that still needs execution.
-- SIGTERM and Ctrl-C stop new worker claims and drain the current simulated
-  attempts with heartbeats maintained. Pending jobs stay durable. Set
+- SIGTERM and Ctrl-C signal workers to stop claiming and drain current
+  attempts with heartbeats maintained. A worker already entering a claim
+  transaction can acquire one last job. Pending jobs stay durable. Set
   deployment shutdown time above your configured provider timeouts and
   retry/failover budget within a single attempt, plus storage latency.
   Forced termination leaves leases for recovery. Graceful shutdown
@@ -137,7 +137,6 @@ an ignored directory under `tmp/`. It exits nonzero on the first failed
 scenario.
 
 ```sh
-cd ~/projects/ai-gateway-advanced-mock
 python3 -m unittest discover -v
 python3 scripts/validate_inference.py
 ```

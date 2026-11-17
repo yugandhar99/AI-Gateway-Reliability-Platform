@@ -127,12 +127,11 @@ to their recorded runs.
 
 ### Repeat the container smoke on Ubuntu
 
-Run these commands from the advanced checkout on Ubuntu with Docker Engine
+Run these commands from the repository root on Ubuntu with Docker Engine
 running and daemon access for your shell. The editing sandbox denied Docker
 socket access, so the local review used approved execution outside it.
 
 ```bash
-cd /home/yetha/projects/ai-gateway-advanced-mock
 (
   set -eu
   image="ai-gateway:advanced-smoke-$(cat /proc/sys/kernel/random/uuid)"
@@ -156,3 +155,27 @@ for scrape in gateway.prom restarted-gateway.prom; do
     prom/prometheus:v3.7.3 check metrics < "$artifacts/$scrape"
 done
 ```
+
+## v2.0.0 publication verification
+
+The publication pass reran the Python 3.14.4 suite and all **83 tests**
+passed in 10.329 seconds. All **30 Docker smoke checks** passed against the
+fresh image built for the isolated monitoring stack. A separate run against
+the cached final review image also passed.
+
+The live inference harness passed in **15.329 seconds**. All 100 concurrent
+submissions were accepted across Enterprise (65), Business (30), and Starter
+(5) in 0.803 seconds. Five workers drained all jobs on their first claim,
+with 100 simulator calls. The estimates settled to 1,170, 540, and 90 tokens
+respectively, with zero outstanding reservations. The replay, crash,
+restart, backpressure, cancellation, dead-letter, and scheduling checks
+also passed. These measurements describe a local simulated workload.
+
+The isolated Compose capture used five workers, ephemeral loopback ports,
+and disposable credentials and storage. The authenticated Prometheus scrape
+was UP, Grafana provisioned all **18 panels**, and all **19 PromQL queries**
+succeeded through the Grafana datasource proxy. Headless Chromium captured
+the dashboard and Prometheus pages after synthetic chat and job traffic.
+Both inference scrapes passed `promtool check metrics`, and the alert rule
+fixtures passed. The README quick start returned a completed simulated job.
+[Capture manifest and image hashes](screenshots/v2/capture.json)

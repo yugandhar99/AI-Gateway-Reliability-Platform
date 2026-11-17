@@ -87,3 +87,25 @@ limits apply as well. SQLite failures return 503. Cancellation durably
 discards the active claim and releases its reservation. Simulated work
 already underway may continue, and its result and token charge are fenced
 out if cancellation wins the transaction.
+
+### Submit, replay, and retrieve
+
+Use the key configured for the running gateway. The first request should
+return 202. Repeat the same request to see HTTP 200 with the original ID
+and `Location`. Replace the example path with the returned value.
+
+```bash
+base=http://127.0.0.1:8000
+auth="Authorization: Bearer $GATEWAY_STARTER_API_KEY"
+curl -i "$base/jobs" -H "$auth" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: api-guide-demo-1' \
+  -d '{"provider":"OpenAI","prompt":"Explain lease recovery","priority":7}'
+job_path=/jobs/REPLACE_WITH_RETURNED_ID
+curl -i "$base$job_path" -H "$auth"
+curl -i "$base$job_path/result" -H "$auth"
+curl -fsS "$base/usage" -H "$auth"
+```
+
+On a pending result, wait for the `Retry-After` interval before polling
+again. To cancel a separate active example, issue
+`curl -i -X DELETE "$base$job_path" -H "$auth"`.

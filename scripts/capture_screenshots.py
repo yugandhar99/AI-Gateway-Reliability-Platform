@@ -15,10 +15,10 @@ import sys
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'docs/screenshots'
+OUT = ROOT / 'docs/screenshots/v2'
 COMPOSE = ['docker', 'compose', '--env-file', '.env.monitoring', '-f', 'compose.monitoring.yaml']
 CAPTIONS = {
-    'grafana-dashboard.png': ('Grafana AI Gateway dashboard', 'All twelve provisioned panels, captured after synthetic normal, outage, timeout and recovery traffic. Zero incident approvals are valid: the capture does not approve remediation.'),
+    'grafana-dashboard.png': ('Grafana AI Gateway dashboard', 'All eighteen provisioned panels from the local simulated stack.'),
     'prometheus-targets.png': ('Prometheus targets', 'Actual scrape target state for the authenticated AI Gateway metrics endpoint.'),
     'prometheus-alerts.png': ('Prometheus alert rules', 'Loaded alert rules and their current evaluation state; this does not imply an alert is firing.'),
     'gateway-health.png': ('AI Gateway health endpoint', 'Live /health response from the local gateway. This endpoint reports process liveness.'),
@@ -64,9 +64,12 @@ def main():
     # Read only known local credentials; never print them or put them in argv.
     sensitive = [p.read_text().strip() for p in (ROOT / 'secrets/monitoring').iterdir() if p.is_file()]
     password = (ROOT / 'secrets/monitoring/grafana').read_text().strip()
+    customer_key = (ROOT / 'secrets/monitoring/customer').read_text().strip()
     if not password:
         raise RuntimeError('Grafana password is empty')
     container_rows()  # Fail before generating traffic if Docker is inaccessible.
+    revision = command(['git', 'rev-parse', 'HEAD'])
+    working_tree_dirty = bool(command(['git', 'status', '--porcelain']))
     captured = []
     stamp = datetime.now(timezone.utc).isoformat()
     with sync_playwright() as pw:
@@ -82,7 +85,24 @@ def main():
             # Obtain baseline scrapes before counters change, then allow recovery scrapes.
             page.wait_for_timeout(20000)
             subprocess.run([sys.executable, 'scripts/simulate_traffic.py', '--requests', '20', '--interval', '1'], cwd=ROOT, check=True)
+            headers = {'Authorization': 'Bearer ' + customer_key}
+            jobs = []
+            for priority in range(5):
+                response = context.request.post(
+                    'http://127.0.0.1:8003/jobs', headers=headers,
+                    data={'prompt': 'Synthetic monitoring job', 'provider': 'OpenAI',
+                          'priority': priority},
+                )
+                if response.status != 202:
+                    raise RuntimeError('Synthetic job admission failed')
+                jobs.append(response.json()['id'])
             page.wait_for_timeout(30000)
+            for job in jobs:
+                result = context.request.get(
+                    f'http://127.0.0.1:8003/jobs/{job}/result', headers=headers,
+                )
+                if result.status != 200:
+                    raise RuntimeError('Synthetic job did not complete')
         query = context.request.get('http://127.0.0.1:9090/api/v1/query', params={'query': 'up{job="ai-gateway"}'}).json()
         values = query.get('data', {}).get('result', [])
         if not values or any(item['value'][1] != '1' for item in values):
@@ -96,7 +116,7 @@ def main():
             captured.append(name)
             print('Captured ' + name, flush=True)
 
-        grafana = browser.new_context(locale='en-US', viewport={'width': 1920, 'height': 1950})
+        grafana = browser.new_context(locale='en-US', viewport={'width': 1920, 'height': 3000})
         login = grafana.request.post('http://127.0.0.1:3000/login', data={'user': 'admin', 'password': password})
         if not login.ok:
             raise RuntimeError('Grafana login failed')
@@ -105,8 +125,8 @@ def main():
             raise RuntimeError('Grafana dashboard API unavailable')
         dashboard_data = dashboard_response.json()
         dashboard = dashboard_data['dashboard']
-        if len(dashboard['panels']) != 12:
-            raise RuntimeError('Expected exactly twelve dashboard panels')
+        if len(dashboard['panels']) != 18:
+            raise RuntimeError('Expected exactly eighteen dashboard panels')
         gp = grafana.new_page()
         gp.goto('http://127.0.0.1:3000' + dashboard_data['meta']['url'] + '?orgId=1&from=now-15m&to=now&kiosk', wait_until='domcontentloaded')
         for panel in dashboard['panels']:
@@ -149,6 +169,8 @@ def main():
                 if not runs or runs[0]['conclusion'] != 'success' or runs[0]['status'] != 'completed':
                     raise RuntimeError('No accessible successful run')
                 run = runs[0]
+                if run['head_sha'] != revision or working_tree_dirty:
+                    raise RuntimeError('Successful run does not match the capture revision')
                 page.set_viewport_size({'width': 1600, 'height': 1000})
                 response = page.goto(run['html_url'], wait_until='networkidle', timeout=60000)
                 if not response.ok:
@@ -160,14 +182,13 @@ def main():
                 github_note = 'Unavailable: no verified public successful run could be captured. No authenticated browser state was used.'
                 print(github_note)
         browser.close()
-    revision = command(['git', 'rev-parse', 'HEAD'])
-    manifest = {'started_utc': stamp, 'source_revision': revision, 'working_tree_dirty': bool(command(['git', 'status', '--porcelain'])), 'environment': 'local Docker Compose, simulated providers, headless Chromium', 'scenario': ('Existing telemetry from prior synthetic normal, preferred outage, all-provider timeout and recovery workload; no new traffic generated by this invocation' if args.reuse_traffic else '20 requests per phase: normal, preferred outage, all-provider timeout, recovery; original scenario restored'), 'command': 'python scripts/capture_screenshots.py' + (' --skip-github' if args.skip_github else '') + (' --reuse-traffic' if args.reuse_traffic else '') + (' --browser-ws ' + args.browser_ws if args.browser_ws else ''), 'images': captured, 'sha256': {name: hashlib.sha256((OUT / name).read_bytes()).hexdigest() for name in captured}, 'browser_transport': 'local Playwright server' if args.browser_ws else 'local Chromium', 'docker_state': rows, 'github_actions': github_note}
+    manifest = {'started_utc': stamp, 'source_revision': revision, 'working_tree_dirty': working_tree_dirty, 'environment': 'local Docker Compose, simulated providers, headless Chromium', 'scenario': ('Existing telemetry reused without generating traffic' if args.reuse_traffic else '20 chat requests per phase: normal, preferred outage, all-provider timeout, recovery; original scenario restored; five asynchronous jobs submitted and results checked'), 'command': 'python scripts/capture_screenshots.py' + (' --skip-github' if args.skip_github else '') + (' --reuse-traffic' if args.reuse_traffic else '') + (' --browser-ws ' + args.browser_ws if args.browser_ws else ''), 'images': captured, 'sha256': {name: hashlib.sha256((OUT / name).read_bytes()).hexdigest() for name in captured}, 'browser_transport': 'local Playwright server' if args.browser_ws else 'local Chromium', 'docker_state': rows, 'github_actions': github_note}
     (OUT / 'capture.json').write_text(json.dumps(manifest, indent=2) + '\n')
     block = '<!-- BEGIN GENERATED SCREENSHOTS -->\n\n'
     for name in captured:
         title, caption = CAPTIONS[name]
-        block += f'**{title}**\n\n{caption}\n\n![{title}](docs/screenshots/{name})\n\n'
-    block += '[Capture provenance](docs/screenshots/capture.json). Screenshots show a local simulated workload, not a production deployment.\n\n<!-- END GENERATED SCREENSHOTS -->'
+        block += f'**{title}**\n\n{caption}\n\n![{title}](docs/screenshots/v2/{name})\n\n'
+    block += '[Capture provenance](docs/screenshots/v2/capture.json). Screenshots show a local simulated workload, not a production deployment.\n\n<!-- END GENERATED SCREENSHOTS -->'
     readme = ROOT / 'README.md'
     content = readme.read_text()
     start = content.index('<!-- BEGIN GENERATED SCREENSHOTS -->')

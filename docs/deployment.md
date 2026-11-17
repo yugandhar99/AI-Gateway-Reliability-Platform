@@ -36,8 +36,9 @@ The same command accepts the queue, retry, and lease flags described in the
 [inference runbook](runbooks/inference.md). The image health check probes
 `/health`. Use authenticated Prometheus worker and queue metrics to verify
 processing. When increasing provider timeouts or retries, set the container
-stop grace period long enough for active jobs to finish. SIGTERM stops fresh
-claims and gives active workers time to settle their claims. Queued work stays
+stop grace period long enough for active jobs to finish. SIGTERM signals workers to stop
+claiming and gives active workers time to settle. A claim already entering
+a transaction can still finish acquisition. Queued work stays
 in SQLite.
 
 To test a newly built image without interrupting Compose, use the
@@ -50,7 +51,7 @@ docker build -t ai-gateway:stage5 .
 python3 scripts/ci_container_smoke.py
 ```
 
-It retains stopped containers and its volume for review. Remove them manually only after reviewing their records. The stage4/stage5/stage6 image tags and Compose project names in existing assets are development identifiers, not released versions.
+It removes the test containers and volume when the run finishes. The stage4/stage5/stage6 image tags and Compose project names in existing assets are development identifiers, not released versions.
 
 ## Kubernetes prerequisites
 
@@ -142,11 +143,11 @@ docker run --rm --entrypoint promtool -v "$PWD/monitoring:/etc/prometheus:ro" \
 docker compose --env-file .env.monitoring -f compose.monitoring.yaml stop
 ```
 
-Traffic demonstrations can be run with `python3 scripts/simulate_traffic.py --help`; inspect the scenario and use only the isolated monitoring stack. Metrics include HTTP counts and latency, provider attempts/failures/retries/failovers, circuit states, estimated tokens, security rejections and incident state. Counters reset with the gateway process. Prometheus retains two days or 256 MB, whichever storage constraint applies. The Compose deployment does not install monitoring into Kubernetes.
+Traffic demonstrations can be run with `python3 scripts/simulate_traffic.py --help`; inspect the scenario and use only the isolated monitoring stack. Metrics include HTTP counts and latency, provider attempts/failures/retries/failovers, circuit states, estimated tokens, security rejections and incident state. HTTP and routing counters reset with the gateway process. Durable queue transition counters remain in SQLite. Prometheus retains two days or 256 MB, whichever storage constraint applies. The Compose deployment does not install monitoring into Kubernetes.
 
 ## GitHub Actions and offline validation
 
-CI currently targets `master` pushes and pull requests. If the destination default branch is different, update both workflow branch filters. Actions are SHA-pinned with read-only repository permissions and checkout credential persistence disabled. CI performs Python tests, compile checks, dashboard validation, detection-only incident checks, image build, container smoke tests, checksum-verified tool installation, infrastructure validation, alert checks and monitoring integration. It does not publish images or deploy a cluster. A workflow file alone is not evidence of a successful hosted run.
+CI currently targets `master` pushes and pull requests. If the destination default branch is different, update both workflow branch filters. Actions are SHA-pinned with read-only repository permissions and checkout credential persistence disabled. CI performs Python tests, the live asynchronous inference validator, compile checks, dashboard validation, detection-only incident checks, image build, container smoke tests, checksum-verified tool installation, infrastructure validation, alert checks and monitoring integration. It does not publish images or deploy a cluster. A workflow file alone is not evidence of a successful hosted run.
 
 ```bash
 bash scripts/install_ci_tools.sh
@@ -155,3 +156,20 @@ python3 scripts/validate_infra.py
 ```
 
 Tool installation is pinned for Linux amd64. Infrastructure validation needs network access to Kubernetes schemas and validates rendered configuration, not cluster scheduling or runtime storage behavior.
+
+## Upgrade and rollback
+
+1. Pause submissions. Drain active jobs if the deployment can wait. Record
+   outstanding job IDs and queue state before stopping the gateway.
+2. Stop writers or use SQLite's online backup API to take a consistent,
+   private backup. Keep the existing volume and tenant credentials.
+3. Upgrade one replica with a Recreate rollout. Allow time for a graceful
+   stop based on the provider retry and failover budget. Startup initializes
+   the job tables alongside the existing usage data.
+4. Confirm health, worker slots, authenticated submission and polling, result
+   settlement, and queue progress. Check the [inference runbook](runbooks/inference.md)
+   for lease recovery and backpressure.
+5. Review database compatibility before rolling back the image. A synchronous
+   gateway cannot process queued jobs. Retain a backup of the upgraded state
+   before restoring an older snapshot, and reconcile any work and usage
+   recorded after the snapshot.

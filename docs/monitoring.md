@@ -29,4 +29,17 @@ The [alert rules](../monitoring/alerts.yml) evaluate scrape unavailability for o
 
 Check target status at `http://127.0.0.1:9090/targets`. `python3 scripts/check_monitoring.py` verifies the local stack once running. Rule behavior is covered by [Prometheus fixtures](../monitoring/alerts.test.yml); see the deployment guide for commands and the [validation record](validation.md) for checks actually performed.
 
-Use [screenshot guidance](../screenshots/README.md) when recording genuine dashboard evidence. The README gallery records genuine local runtime captures and their provenance; it does not demonstrate cloud deployment.
+Start with **Inference queue pressure** and **Oldest ready inference job**
+when users report delays. Rising ready age with live workers calls for
+checking provider circuits and lease recovery. Pair the backpressure panel
+with the job API error code to distinguish global capacity, per-tenant
+capacity, and ordinary rate limits. Queue pressure and transition counters
+describe the SQLite file. Worker gauges describe the scrape target's process.
+
+See the [capture guidance and provenance](screenshots/README.md) for current
+and historical monitoring evidence.
+
+Queue pressure uses the active-job count divided by global capacity and is
+displayed on a 0–100% axis. For a tenant-specific admission rejection, use
+the response code in the job API. Dashboard queries use bounded aggregate
+labels.

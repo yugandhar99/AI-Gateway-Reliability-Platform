@@ -1,0 +1,25 @@
+{
+  "started_utc": "2026-11-17T20:39:23.946454+00:00",
+  "gateway_source_revision": "16d19bb",
+  "dashboard_sha256": "2b422221c19d23c48bdef56fbe1eff64bdf1ceaf2c98be0a1de8bec2a4801e69",
+  "environment": "isolated Compose project, five gateway workers, simulated providers, headless Chromium",
+  "workload": {
+    "chat_requests": 10,
+    "jobs_submitted": 10,
+    "results_verified": 10
+  },
+  "prior_traffic_in_same_stack": {
+    "chat_requests": 35,
+    "jobs_completed": 20
+  },
+  "validation": {
+    "prometheus_target_up": true,
+    "grafana_panels": 18,
+    "promql_queries": 19
+  },
+  "sha256": {
+    "grafana-dashboard.png": "6aeb7126d4da9166ce9ace06b80ef34ca8aee190ae11972e0247f67c27333f4f",
+    "prometheus-targets.png": "d82d549ced226f0c9da33447c2dfb0008cf6e0526a1e4820c0a1fe228ebc623b",
+    "prometheus-alerts.png": "eea3577194663603b5904f7e048ed6234ddb86f5fb98ce8984575e807eaf8356"
+  }
+}

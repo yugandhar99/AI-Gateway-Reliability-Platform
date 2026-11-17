@@ -24,7 +24,7 @@ jobs:
         run: python -m unittest discover -v
       - name: Validate asynchronous inference integration
         run: python scripts/validate_inference.py
-      - name: Compile Python and validate Stage 7 monitoring panels
+      - name: Compile Python and validate monitoring panels
         run: |
           python -m compileall -q gateway scripts tests
           python scripts/validate_incident_dashboard.py
