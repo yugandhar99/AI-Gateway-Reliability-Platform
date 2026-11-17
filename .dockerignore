@@ -1,0 +1,7 @@
+# Only application source and the Dockerfile may enter the build context.
+# This excludes Git, .aws/.codex/.agents, keys, .env files, databases,
+# tests, caches, virtual environments, and local simulation/scratch files.
+**
+!Dockerfile
+!gateway/
+!gateway/*.py

@@ -1,8 +1,167 @@
 # AI Model Gateway & Reliability Platform
 
-Stage 3 is a local HTTP API that simulates OpenAI, Anthropic, and Gemini.
+Stage 4 adds Docker containerization to the local HTTP API that simulates OpenAI, Anthropic, and Gemini.
 It uses only the Python standard library. No real provider API keys, paid services, package
 installation, or external API calls are needed. Local demo bearer keys are required. Python 3.10+ is recommended.
+
+## Stage 4: Docker on localhost:8002
+
+Run all commands from this project directory in Ubuntu WSL 2. Docker Desktop
+must be running with integration enabled for this WSL distribution. The Stage 2
+and Stage 3 servers on ports 8000 and 8001 can stay running.
+
+New files and design choices:
+
+- `Dockerfile` uses the official `python:3.13-slim-bookworm` image. The app needs
+  only Python's standard library, so there are no pip dependencies, compiler tools,
+  model downloads, or extra health-check packages. The version tag receives upstream
+  updates; use an image digest if you later need identical base bytes on every build.
+  Only `gateway/` is copied. Python runs directly as user/group 10001, with no root
+  startup script. `/data` is owned by that user and has mode 700. A fresh named
+  volume inherits these permissions, allowing SQLite to create its database and
+  journal files. `EXPOSE 8000` documents the internal port; it does not publish it.
+- `.dockerignore` uses an allowlist: only the Dockerfile and gateway Python files
+  enter the build context. Git metadata, credential directories, `.env` files,
+  local databases and sidecars, caches, tests, and simulation files stay outside.
+- `compose.yaml` builds `ai-gateway:stage4`, passes keys at runtime, publishes
+  `127.0.0.1:8002:8000`, and mounts the project-scoped named volume
+  `ai-gateway-stage4_usage` at `/data`. It drops Linux capabilities and prevents
+  privilege escalation. Docker can restart the service unless you explicitly stop it.
+  At least the Starter key is required by this Compose configuration; other keys
+  are optional. The application itself still supports any configured customer tier.
+- `docker_smoke.py` is a manual integration checker. It verifies Docker health,
+  the container user, localhost publishing, missing/invalid/valid authentication,
+  a simulated chat, and SQLite usage after both restart and container replacement.
+  It records one real simulated request in the Stage 4 database and leaves the
+  service and volume in place. It does not print credentials.
+
+The container listens on `0.0.0.0:8000` so Docker can forward requests to it.
+The host publishes only localhost port 8002. The health check calls `/health`
+using Python every 10 seconds, with a 2-second HTTP timeout, a 3-second Docker
+timeout, a 5-second startup grace period, and three failed checks before unhealthy.
+This endpoint checks HTTP liveness; authenticated chat and SQLite writes are
+checked separately by the smoke script. Unhealthy status alone does not trigger
+Docker's restart policy. This remains a local learning server using `http.server`;
+containerization does not turn it into a public production web server.
+
+### Configure keys, build, and start with Compose
+
+Generate local demo credentials in your current shell. They are unrelated to real
+AI provider keys. Keep this shell open for the later commands; do not use `set -x`.
+Do not print `docker inspect` or `docker compose config` output: those can contain
+runtime environment secrets. Environment variables avoid baking keys into image
+layers, but people with Docker daemon access can still inspect them.
+
+```bash
+cd ~/projects/ai-platform-mock
+umask 077
+export GATEWAY_STARTER_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export GATEWAY_BUSINESS_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export GATEWAY_ENTERPRISE_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export GATEWAY_ADMIN_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker build --tag ai-gateway:stage4 .
+docker compose up -d --wait --wait-timeout 60
+docker compose ps
+curl --fail http://127.0.0.1:8002/health
+```
+
+No keys are build arguments or stored in the Dockerfile. Keep the same credentials
+when recreating containers. Generating new keys changes credentials but retains
+usage for the fixed demo customer IDs. Named-volume storage is separate from all
+existing host database files, which are neither copied nor modified.
+
+### Verify and restart
+
+```bash
+python3 -m unittest discover -v
+python3 docker_smoke.py
+docker compose restart gateway
+docker compose up -d --wait --wait-timeout 60
+```
+
+The smoke script exits with an error if any check fails. If the existing Starter
+customer has already reached its five-requests-per-minute limit, wait one minute
+and retry. It assumes no other client modifies Stage 4 usage during the check and
+that the check does not cross a UTC month boundary. Provider metrics and circuit
+state reset on restart; SQLite usage survives. Restarting the same container alone
+does not prove volume storage, so the script also recreates the container.
+
+### Equivalent plain Docker run
+
+Use this as an alternative to Compose, after stopping Compose to free port 8002.
+The separate named volume below intentionally keeps the two deployment examples
+independent. Environment flags pass values from your current shell without putting
+their literal values into command history.
+
+```bash
+docker compose down
+docker volume create ai-gateway-stage4-manual-usage
+docker run -d --name ai-gateway-stage4-manual \
+  --publish 127.0.0.1:8002:8000 \
+  --mount type=volume,source=ai-gateway-stage4-manual-usage,target=/data \
+  --env GATEWAY_STARTER_API_KEY \
+  --env GATEWAY_BUSINESS_API_KEY \
+  --env GATEWAY_ENTERPRISE_API_KEY \
+  --env GATEWAY_ADMIN_API_KEY \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  --restart unless-stopped ai-gateway:stage4
+docker inspect --format '{{.State.Health.Status}}' ai-gateway-stage4-manual
+curl --fail http://127.0.0.1:8002/health
+docker stop ai-gateway-stage4-manual
+docker start ai-gateway-stage4-manual
+```
+
+Health status can initially be `starting`; check again after about 10 seconds.
+
+### Stop and cleanup without deleting data
+
+```bash
+# Compose: stop, then optionally remove its containers and network; retain volume.
+docker compose stop
+docker compose down
+# Plain Docker alternative: stop and optionally remove only this example container.
+docker stop ai-gateway-stage4-manual
+docker rm ai-gateway-stage4-manual
+# Optional: remove only the Stage 4 image after removing containers that use it.
+docker image rm ai-gateway:stage4
+unset GATEWAY_STARTER_API_KEY GATEWAY_BUSINESS_API_KEY GATEWAY_ENTERPRISE_API_KEY GATEWAY_ADMIN_API_KEY
+```
+
+Use only the cleanup commands for the deployment you created. These commands do
+not delete databases or named volumes. Avoid `docker compose down -v`, volume
+removal, and Docker prune commands when you want to retain accounting data.
+
+### Troubleshooting
+
+- Docker socket permission denied: run `docker version` in your normal WSL terminal.
+  Check Docker Desktop is running and Settings → Resources → WSL Integration is
+  enabled for this distribution. Do not make the socket world-writable. If Codex
+  alone is blocked, execute the build/start/test commands above manually there.
+- Missing key error: export `GATEWAY_STARTER_API_KEY` in the same shell before
+  starting. A server without any customer key intentionally refuses to start.
+  After changing keys, use `docker compose up -d --force-recreate --wait`.
+- Port already allocated: inspect `docker compose ps` and `ss -ltn 'sport = :8002'`.
+  Stop only your Stage 4 deployment that owns this port. Leave 8000/8001 alone.
+- Startup or unhealthy status: use `docker compose logs --tail=50 gateway` and
+  `docker compose ps`. The app omits credentials and prompts from its logs.
+  Check the health endpoint with `curl --fail http://127.0.0.1:8002/health`.
+- SQLite permission errors: use the fresh named volume from these examples.
+  Binding an existing host directory hides the image's `/data` ownership; its
+  directory and database must be writable by UID/GID 10001, including journal
+  creation. Do not change ownership or delete an existing database blindly.
+- Health succeeds but chat fails: `/health` is public. Chat needs a customer
+  bearer key and JSON; `/metrics` needs the separate admin key. Rate limits and
+  quotas still apply. Use `python3 docker_smoke.py` for the authenticated check.
+
+### Actual Stage 4 verification in Codex
+
+The full host Python suite passed: **36 tests, 0 failures**. The smoke script
+passed Python syntax compilation. Docker daemon access returned `permission
+denied` both inside the sandbox and on an approved escalated retry. Therefore
+the image build, Compose runtime configuration, container startup, health,
+container authentication, non-root filesystem access, and volume persistence
+could not be verified in this session. The commands above are the exact manual
+steps to complete those checks; they are not claimed as passing results.
 
 ## Run locally
 

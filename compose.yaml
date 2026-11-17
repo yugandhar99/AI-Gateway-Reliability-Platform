@@ -1,0 +1,21 @@
+name: ai-gateway-stage4
+services:
+  gateway:
+    image: ai-gateway:stage4
+    build: .
+    ports:
+      - "127.0.0.1:8002:8000"
+    environment:
+      GATEWAY_STARTER_API_KEY: "${GATEWAY_STARTER_API_KEY:?Export a Starter API key before starting}"
+      GATEWAY_BUSINESS_API_KEY: "${GATEWAY_BUSINESS_API_KEY:-}"
+      GATEWAY_ENTERPRISE_API_KEY: "${GATEWAY_ENTERPRISE_API_KEY:-}"
+      GATEWAY_ADMIN_API_KEY: "${GATEWAY_ADMIN_API_KEY:-}"
+    volumes:
+      - usage:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  usage:
