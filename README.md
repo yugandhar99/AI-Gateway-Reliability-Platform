@@ -1,5 +1,5 @@
 <p align="center"><img src="docs/assets/banner.svg" alt="AI Inference Orchestration Platform v2.0.0" width="100%"></p>
- 
+
 # AI Inference Orchestration Platform
 
 An independent engineering portfolio project demonstrating durable asynchronous inference, tenant isolation, and failure recovery. The original synchronous gateway remains available through `POST /chat`. OpenAI, Anthropic, and Gemini are deterministic simulators. Deployment and validation target a single host.
