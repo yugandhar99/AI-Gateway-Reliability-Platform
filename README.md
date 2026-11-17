@@ -101,7 +101,7 @@ monitoring/                 Prometheus rules, fixtures and Grafana provisioning
 scripts/                    Validation, setup, traffic and incident tools
 tests/                      Automated Python tests
 docs/                       Architecture, API, deployment, validation and audit
-screenshots/                Capture guidance; no fabricated images
+docs/screenshots/           Automated runtime captures and provenance
 Dockerfile                  Non-root application image
 compose.yaml                Local gateway on loopback port 8002
 compose.monitoring.yaml     Gateway 8003, Prometheus 9090, Grafana 3000
@@ -168,15 +168,14 @@ Follow the [deployment guide](docs/deployment.md) for Docker smoke tests, namesp
 stateDiagram-v2
   [*] --> Open: Correlate symptoms
   Open --> Approved: Administrator selects allowlisted action
-  Approved --> Open: Approval expires or evidence changes
-  Approved --> Executing: Validate revision and claim approval
+  Approved --> Open: Approval invalidated
+  Approved --> Executing: Claim valid approval
   Executing --> Verifying: Action completes
   Executing --> Open: Action fails
-  Verifying --> Resolved: Fresh successful chat evidence
-  Verifying --> Verifying: Recovery criteria unmet
+  Verifying --> Resolved: Fresh successful chat
 ```
 
-The diagram shows the operator workflow; `Approved` represents a separate approval record while the incident remains open or verifying. Expiry and evidence changes cause execution to be rejected.
+The diagram shows the operator workflow; `Approved` represents a separate approval record while the incident remains open or verifying. Expiry and evidence changes cause execution to be rejected. Incidents remain in verification until recovery criteria are met.
 
 Detection evaluates a rolling 60-second chat window and provider state. It classifies incidents as P1/P2/P3 and persists evidence, recommendations, approvals, and audit events. No shell, LLM, Kubernetes controller, or external recovery command executes. Optional mock restoration must be enabled at startup and approved by an administrator. [Runbook](docs/runbooks/incidents.md).
 
@@ -204,7 +203,7 @@ The [existing CI workflow](.github/workflows/ci.yml) remains unchanged. The live
 
 ## Testing
 
-The publication review passed **70 Python tests** on Python 3.14.4, compilation, dashboard validation, and isolated HTTP incident detection with the approval guard. CI targets Python 3.13. The [validation record](docs/validation.md) distinguishes fresh results from checks that were not run; these checks do not establish a cloud deployment or production readiness.
+Final verification passed **70 Python tests**, all **13 container smoke checks**, compilation, dashboard and infrastructure validation, Prometheus alert fixtures, live monitoring integration, and isolated HTTP incident detection with the approval guard. Host Python was 3.14.4; CI targets Python 3.13. The [validation record](docs/validation.md) records the checks and their limits; they do not establish a cloud deployment or production readiness.
 
 ```bash
 python3 -m unittest discover -v
@@ -216,7 +215,55 @@ See [development and troubleshooting](docs/development.md) for infrastructure to
 
 ## Monitoring and screenshots
 
-The [monitoring guide](docs/monitoring.md) documents all twelve Grafana panels, alert thresholds, and Prometheus target checks. Runtime screenshots have not been captured for this draft. [Capture instructions](screenshots/README.md) describe how to add genuine, redacted evidence; the banner is a design asset.
+The [monitoring guide](docs/monitoring.md) documents all twelve Grafana panels, alert thresholds, and Prometheus target checks. [Screenshot automation](docs/screenshots/README.md) captures the running stack with Playwright and headless Chromium, generates synthetic traffic, and builds a visual report from actual Docker container status. It also attempts to capture a verified successful public GitHub Actions run.
+
+```bash
+.venv-screenshots/bin/python scripts/capture_screenshots.py
+```
+
+See the [installation and execution commands](docs/screenshots/README.md) first. Successful captures automatically populate the gallery below with professional descriptions and capture provenance.
+
+<!-- BEGIN GENERATED SCREENSHOTS -->
+
+**Grafana AI Gateway dashboard**
+
+All twelve provisioned panels, captured after synthetic normal, outage, timeout and recovery traffic. Zero incident approvals are valid: the capture does not approve remediation.
+
+![Grafana AI Gateway dashboard](docs/screenshots/grafana-dashboard.png)
+
+**Prometheus targets**
+
+Actual scrape target state for the authenticated AI Gateway metrics endpoint.
+
+![Prometheus targets](docs/screenshots/prometheus-targets.png)
+
+**Prometheus alert rules**
+
+Loaded alert rules and their current evaluation state; this does not imply an alert is firing.
+
+![Prometheus alert rules](docs/screenshots/prometheus-alerts.png)
+
+**AI Gateway health endpoint**
+
+Live /health response from the local gateway. This endpoint reports process liveness.
+
+![AI Gateway health endpoint](docs/screenshots/gateway-health.png)
+
+**Docker container health report**
+
+A generated visual report of actual Compose container state, restart count, exit code and configured health checks. Containers without a health check are labeled explicitly.
+
+![Docker container health report](docs/screenshots/docker-health.png)
+
+**Successful GitHub Actions workflow**
+
+A public GitHub Actions run verified as completed successfully through the GitHub API before capture. The run revision is recorded in provenance; local documentation commits require their own hosted run.
+
+![Successful GitHub Actions workflow](docs/screenshots/github-actions.png)
+
+[Capture provenance](docs/screenshots/capture.json). Screenshots show a local simulated workload, not a production deployment.
+
+<!-- END GENERATED SCREENSHOTS -->
 
 ## Limitations and project roadmap
 

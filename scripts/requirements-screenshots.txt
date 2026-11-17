@@ -1,0 +1,2 @@
+# Capture tooling only; not an application runtime dependency.
+playwright==1.56.0

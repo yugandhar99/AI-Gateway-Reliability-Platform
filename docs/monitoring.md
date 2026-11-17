@@ -23,4 +23,4 @@ The [alert rules](../monitoring/alerts.yml) evaluate scrape unavailability for o
 
 Check target status at `http://127.0.0.1:9090/targets`. `python3 scripts/check_monitoring.py` verifies the local stack once running. Rule behavior is covered by [Prometheus fixtures](../monitoring/alerts.test.yml); see the deployment guide for commands and the [validation record](validation.md) for checks actually performed.
 
-Use [screenshot guidance](../screenshots/README.md) when recording genuine dashboard evidence. No runtime screenshot or cloud monitoring claim is included in this publication draft.
+Use [screenshot guidance](../screenshots/README.md) when recording genuine dashboard evidence. The README gallery records genuine local runtime captures and their provenance; it does not demonstrate cloud deployment.

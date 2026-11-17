@@ -42,3 +42,6 @@ htmlcov/
 /.aws/
 /.codex/
 /.agents/
+
+# Isolated screenshot capture dependencies
+/.venv-screenshots/
