@@ -1,4 +1,4 @@
-name: ai-gateway-stage4
+name: ai-gateway-stage4 
 services:
   gateway:
     image: ai-gateway:stage4
