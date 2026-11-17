@@ -66,7 +66,7 @@ def main():
     validate((ROOT/'k8s/secret.yaml.example').read_text())
     scenarios = [
         ('ai-gateway', [], 8000, 8000, 'ai-gateway-keys'),
-        ('interview', ['--set', 'containerPort=8080,service.port=80,existingSecret=demo-keys,storage.storageClassName=fast,storage.size=2Gi,image.tag=review,probes.startup.failureThreshold=45', '--set-string', 'env.DEMO_MODE=enabled'], 8080, 80, 'demo-keys'),
+        ('custom-config', ['--set', 'containerPort=8080,service.port=80,existingSecret=demo-keys,storage.storageClassName=fast,storage.size=2Gi,image.tag=review,probes.startup.failureThreshold=45', '--set-string', 'env.DEMO_MODE=enabled'], 8080, 80, 'demo-keys'),
         ('explicit-class', ['--set-string', 'storage.storageClassName='], 8000, 8000, 'ai-gateway-keys'),
     ]
     for release, overrides, port, service_port, secret in scenarios:
