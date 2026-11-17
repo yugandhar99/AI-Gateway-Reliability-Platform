@@ -1,0 +1,265 @@
+{
+  "uid": "ai-gateway",
+  "title": "AI Gateway Reliability",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Chat throughput",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(gateway_http_requests_total{route=\"/chat\"}[1m]))",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Chat HTTP error rate (4xx + 5xx)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(gateway_http_requests_total{route=\"/chat\",status=~\"[45]..\"}[5m])) or vector(0)) / clamp_min(sum(rate(gateway_http_requests_total{route=\"/chat\"}[5m])), 0.001)",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Chat P95 latency",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gateway_http_request_duration_seconds_bucket{route=\"/chat\"}[5m])))",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Provider availability",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_provider_available",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Failover events",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider) (rate(gateway_failovers_total[5m]))",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Circuit breaker states",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_circuit_breaker_state",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Provider failures and retries",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "{__name__=~\"gateway_provider_failures_total|gateway_retries_total\"}",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "title": "Aggregate estimated tokens",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "gateway_tokens_total",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "title": "Authentication and rate limit rejections",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "gateway-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "{__name__=~\"gateway_authentication_failures_total|gateway_rate_limits_total\"}",
+          "refId": "A",
+          "legendFormat": "{{provider}} {{state}} {{__name__}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

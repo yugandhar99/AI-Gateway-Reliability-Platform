@@ -32,3 +32,19 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check PyYAML==6.0.3
           python scripts/validate_infra.py
+
+      - name: Initialize isolated monitoring stack
+        run: python scripts/setup_monitoring.py
+      - name: Validate monitoring configuration and alert behavior
+        run: |
+          docker compose --env-file .env.monitoring -f compose.monitoring.yaml config --quiet
+          docker compose --env-file .env.monitoring -f compose.monitoring.yaml run --rm --no-deps --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
+          docker run --rm --entrypoint promtool -v "$PWD/monitoring:/etc/prometheus:ro" -w /etc/prometheus prom/prometheus:v3.7.3 check rules alerts.yml
+          docker run --rm --entrypoint promtool -v "$PWD/monitoring:/etc/prometheus:ro" -w /etc/prometheus prom/prometheus:v3.7.3 test rules alerts.test.yml
+      - name: Start monitoring stack
+        run: docker compose --env-file .env.monitoring -f compose.monitoring.yaml up -d --build
+      - name: Verify monitoring integration
+        run: python scripts/check_monitoring.py
+      - name: Stop only monitoring services (retain data)
+        if: always()
+        run: docker compose --env-file .env.monitoring -f compose.monitoring.yaml stop

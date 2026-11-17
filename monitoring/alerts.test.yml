@@ -1,0 +1,47 @@
+rule_files: [alerts.yml]
+evaluation_interval: 15s
+tests:
+  - interval: 15s
+    input_series:
+      - series: 'up{job="ai-gateway",instance="gateway:8000"}'
+        values: '0x20'
+      - series: 'gateway_http_requests_total{route="/chat",status="503"}'
+        values: '0+10x20'
+      - series: 'gateway_http_request_duration_seconds_bucket{route="/chat",le="0.5"}'
+        values: '0+0x20'
+      - series: 'gateway_http_request_duration_seconds_bucket{route="/chat",le="1"}'
+        values: '0+10x20'
+      - series: 'gateway_http_request_duration_seconds_bucket{route="/chat",le="+Inf"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDown
+        exp_alerts:
+          - exp_labels: {job: ai-gateway, instance: 'gateway:8000', severity: critical}
+            exp_annotations: {summary: 'Gateway scrape unavailable (check process and scraping credentials)'}
+      - eval_time: 4m
+        alertname: GatewayHighLatency
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: 'Chat P95 latency above 500ms'}
+      - eval_time: 4m
+        alertname: GatewayHighErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: 'Chat server errors above 10 percent'}
+  - interval: 15s
+    input_series:
+      - series: 'up{job="ai-gateway"}'
+        values: '1x20'
+      - series: 'gateway_http_requests_total{route="/chat",status="200"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: GatewayDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayHighLatency
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: GatewayHighErrorRate
+        exp_alerts: []

@@ -56,5 +56,7 @@ def customer_chat(payload, router, store, customer):
     except Exception:
         store.finish(ticket)
         raise
-    store.finish(ticket, input_tokens + estimate_tokens(result["response"]))
+    tokens = input_tokens + estimate_tokens(result["response"])
+    store.finish(ticket, tokens)
+    router.observability.add_tokens(tokens)
     return result

@@ -1,0 +1,65 @@
+name: ai-gateway-stage6
+services:
+  gateway:
+    build: .
+    image: ai-gateway:stage6
+    ports: ["127.0.0.1:8003:8000"]
+    environment:
+      GATEWAY_ENTERPRISE_API_KEY_FILE: /run/secrets/customer
+      GATEWAY_ADMIN_API_KEY_FILE: /run/secrets/admin
+      GATEWAY_METRICS_API_KEY_FILE: /run/secrets/metrics
+    secrets: [customer, admin, metrics]
+    command: [python, -m, gateway.server, --host, 0.0.0.0, --port, '8000', --usage-db, /data/usage.sqlite3, --simulation-file, /simulation/outcomes.json]
+    volumes:
+      - stage6-usage:/data
+      - ./monitoring/runtime/simulation:/simulation:ro
+    mem_limit: 192m
+    cpus: 0.5
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    user: "${MONITORING_UID:?Run scripts/setup_monitoring.py}:${MONITORING_GID:?Run scripts/setup_monitoring.py}"
+    ports: ["127.0.0.1:9090:9090"]
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.path=/prometheus, --storage.tsdb.retention.time=2d, --storage.tsdb.retention.size=256MB]
+    secrets: [metrics]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./monitoring/runtime/prometheus:/prometheus
+    mem_limit: 256m
+    cpus: 0.5
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  grafana:
+    image: grafana/grafana:12.3.0
+    user: "${MONITORING_UID:?Run scripts/setup_monitoring.py}:${MONITORING_GID:?Run scripts/setup_monitoring.py}"
+    ports: ["127.0.0.1:3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: 'false'
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+    secrets: [grafana]
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./monitoring/runtime/grafana:/var/lib/grafana
+    mem_limit: 256m
+    cpus: 0.5
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+secrets:
+  customer:
+    file: ./secrets/monitoring/customer
+  admin:
+    file: ./secrets/monitoring/admin
+  metrics:
+    file: ./secrets/monitoring/metrics
+  grafana:
+    file: ./secrets/monitoring/grafana
+volumes:
+  stage6-usage:

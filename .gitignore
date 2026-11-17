@@ -36,3 +36,9 @@ htmlcov/
 
 # Local infrastructure validation binaries and rendered output
 /.tools/
+/monitoring/runtime/
+
+# Local tool configuration and cloud credentials
+/.aws/
+/.codex/
+/.agents/

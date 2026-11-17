@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sqlite3
+from time import perf_counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -12,11 +13,11 @@ from gateway.providers import PROVIDERS
 from gateway.service import DEFAULT_ROUTER, ValidationError, customer_chat
 from gateway.reliability import AllProvidersFailed, Policy, Router, Simulator
 
-from gateway.security import AuthenticationError, KeyRegistry
+from gateway.security import AuthenticationError, KeyRegistry, environment_key
 from gateway.usage import LimitExceeded, UsageStore
 
 MAX_BODY_BYTES = 65_536
-ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET", "/usage": "GET"}
+ROUTES = {"/health": "GET", "/providers": "GET", "/chat": "POST", "/metrics": "GET", "/usage": "GET", "/metrics/prometheus": "GET"}
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -29,6 +30,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def _json(self, status, payload, headers=None):
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._response_status = status
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -47,6 +49,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self._error(code, message or HTTPStatus(code).phrase)
 
     def _dispatch(self):
+        started = perf_counter()
+        self._response_status = 500
+        try:
+            self._dispatch_errors()
+        finally:
+            path = urlsplit(self.path).path
+            route = path if path in ROUTES else 'unknown'
+            method = self.command if self.command in ('GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS') else 'OTHER'
+            self._router().observability.observe(route, method, self._response_status, perf_counter() - started)
+
+    def _dispatch_errors(self):
         try:
             self._dispatch_authenticated()
         except AuthenticationError:
@@ -74,6 +87,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._json(200, {"status": "healthy", "service": "AI Model Gateway & Reliability Platform"})
         elif path == "/providers":
             self._json(200, {"providers": list(PROVIDERS), "simulated": True})
+        elif path == "/metrics/prometheus":
+            registry = getattr(self.server, 'metrics_keys', None)
+            if registry is None:
+                raise AuthenticationError()
+            registry.authenticate(self.headers, admin=True)
+            data = self._router().observability.render(self._router())
+            self._response_status = 200
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(data)
         elif path == "/metrics":
             self._authenticate(admin=True)
             self._json(200, self._router().metrics())
@@ -134,11 +160,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _dispatch
 
 
-def create_server(host="127.0.0.1", port=8000, router=None, keys=None, usage_store=None):
+def create_server(host="127.0.0.1", port=8000, router=None, keys=None, usage_store=None, metrics_key=None):
     keys = keys if keys is not None else KeyRegistry.from_environment()
     usage_store = usage_store if usage_store is not None else UsageStore("usage.sqlite3")
+    metrics_keys = KeyRegistry(admin_key=metrics_key or environment_key("GATEWAY_METRICS_API_KEY"))
+    if metrics_keys.admin is not None and (metrics_keys.admin == keys.admin or any(
+            digest == metrics_keys.admin for digest, _ in keys.customers)):
+        raise ValueError("Metrics credential must differ from customer and admin credentials")
     server = ThreadingHTTPServer((host, port), GatewayHandler)
     server.router = router or Router()
+    server.metrics_keys = metrics_keys
     server.keys = keys
     server.usage_store = usage_store
     return server

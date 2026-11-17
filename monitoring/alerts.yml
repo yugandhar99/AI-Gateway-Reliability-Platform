@@ -1,0 +1,18 @@
+groups:
+  - name: gateway
+    rules:
+      - alert: GatewayDown
+        expr: up{job="ai-gateway"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations: {summary: 'Gateway scrape unavailable (check process and scraping credentials)'}
+      - alert: GatewayHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(gateway_http_request_duration_seconds_bucket{route="/chat"}[5m]))) > 0.5
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: 'Chat P95 latency above 500ms'}
+      - alert: GatewayHighErrorRate
+        expr: sum(rate(gateway_http_requests_total{route="/chat",status=~"5.."}[5m])) / clamp_min(sum(rate(gateway_http_requests_total{route="/chat"}[5m])), 0.001) > 0.1
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: 'Chat server errors above 10 percent'}

@@ -8,6 +8,7 @@ from threading import Lock
 from time import monotonic, sleep
 
 from gateway.providers import PROVIDERS, simulate_response
+from gateway.observability import Metrics
 
 logger = logging.getLogger("gateway.routing")
 
@@ -106,8 +107,10 @@ class Router:
         self.simulator = simulator or Simulator()
         self.clock = clock
         self.health = {p: Health() for p in PROVIDERS}
+        self.observability = Metrics()
 
     def _log(self, event, provider, **fields):
+        self.observability.event(event, provider)
         logger.info(json.dumps({"event": event, "provider": provider, **fields}, sort_keys=True))
 
     def route(self, prompt, preferred):
@@ -128,6 +131,8 @@ class Router:
                     probe = health.state == "HALF_OPEN"
                     health.probe_active = probe
                     health.requests += 1
+                if attempt:
+                    self._log("retry", provider)
                 self._log("provider_attempt", provider, attempt=attempt + 1)
                 try:
                     result = self.simulator(provider, prompt, policy.timeout_seconds)

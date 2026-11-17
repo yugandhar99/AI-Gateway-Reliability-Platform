@@ -29,6 +29,17 @@ class AuthenticationError(Exception):
     pass
 
 
+def environment_key(name):
+    """Read mounted credentials without placing values in container environment."""
+    path = os.environ.get(name + '_FILE')
+    if path and os.environ.get(name):
+        raise ValueError('Configure a key or its file, not both')
+    if path:
+        with open(path, encoding='ascii') as source:
+            return source.read().strip()
+    return os.environ.get(name)
+
+
 class KeyRegistry:
     def __init__(self, customers=None, admin_key=None):
         self.customers = []
@@ -53,14 +64,14 @@ class KeyRegistry:
     def from_environment(cls):
         customers = {}
         for tier in TIERS:
-            key = os.environ.get(f"GATEWAY_{tier.upper()}_API_KEY")
+            key = environment_key(f"GATEWAY_{tier.upper()}_API_KEY")
             if key:
                 if key in customers:
                     raise ValueError("Customer keys must be distinct")
                 customers[key] = Customer(tier.lower() + '-demo', tier)
         if not customers:
             raise ValueError("Configure at least one GATEWAY_<TIER>_API_KEY")
-        return cls(customers, os.environ.get('GATEWAY_ADMIN_API_KEY'))
+        return cls(customers, environment_key('GATEWAY_ADMIN_API_KEY'))
 
     def authenticate(self, headers, admin=False):
         values = headers.get_all('Authorization', [])

@@ -1,9 +1,241 @@
 # AI Model Gateway & Reliability Platform
 
-Stage 5 adds Kubernetes manifests, a Helm chart, and GitHub Actions CI to the containerized
+Stage 6 adds local Prometheus and Grafana observability to the containerized
 HTTP API that simulates OpenAI, Anthropic, and Gemini.
 It uses only the Python standard library. No real provider API keys, paid services, package
 installation, or external API calls are needed. Local demo bearer keys are required. Python 3.10+ is recommended.
+
+## Stage 6: Prometheus and Grafana
+
+Stage 6 keeps the existing chat API, authentication, quotas, SQLite accounting,
+JSON `/metrics`, and Stage 4/5 deployments. The new deployment is opt-in:
+`compose.monitoring.yaml` uses project `ai-gateway-stage6`, its own usage volume,
+and separate local monitoring data. It does not start Kubernetes or call real AI APIs.
+
+```text
+Client -> localhost:8003 -> Gateway :8000 -> simulated providers
+                               |             (retry / failover / circuit breakers)
+                               |-> SQLite in a separate Stage 6 volume
+Prometheus :9090 -- bearer token file --> /metrics/prometheus
+Grafana :3000 --> Prometheus --> provisioned dashboard
+```
+
+Prometheus collects a snapshot every 15 seconds. Grafana draws graphs from that
+history. Prometheus evaluates three alert rules every 15 seconds. The gateway
+uses a small, thread-safe standard-library text exporter, so the application
+image needs no new Python dependencies.
+
+### Start the separate monitoring deployment
+
+Run from this repository with Python 3, Docker, and Docker Compose available.
+Check that ports 8003, 9090, and 3000 are free; do not stop an unrelated service
+if one is occupied. All three host bindings are explicitly `127.0.0.1`.
+
+```bash
+python3 scripts/setup_monitoring.py
+docker compose --env-file .env.monitoring -f compose.monitoring.yaml config --quiet
+docker compose --env-file .env.monitoring -f compose.monitoring.yaml up -d --build
+python3 scripts/check_monitoring.py
+python3 scripts/simulate_traffic.py
+```
+
+The setup script creates four random, distinct local demo credentials in the
+ignored `secrets/monitoring/` directory: customer, admin, metrics, and Grafana.
+It never prints them and preserves existing keys on subsequent runs. It also
+creates ignored `.env.monitoring` (UID/GID only) and `monitoring/runtime/`.
+Do not run setup as root: Prometheus and Grafana run as your local UID/GID so
+private mounted credentials and their data directories have matching ownership.
+Gateway still runs as UID 10001. Secret files it needs are readable inside their
+individual mounts; the host credential directory has mode 0700 to prevent other
+local users from traversing it. Compose local secrets are mounted files, not
+an encrypted secret store. The build context excludes all local secret files.
+Credentials never appear in Compose values, command arguments, metrics, or Git.
+
+Open:
+
+- Gateway health: <http://127.0.0.1:8003/health>
+- Prometheus targets: <http://127.0.0.1:9090/targets> (expect `ai-gateway` UP)
+- Prometheus alerts: <http://127.0.0.1:9090/alerts>
+- Grafana dashboard: <http://127.0.0.1:3000/d/ai-gateway>
+
+Grafana username is `admin`. Open `secrets/monitoring/grafana` privately in your
+local editor and paste its value into the browser password field. Do not paste
+it into terminal output, screenshots, issues, or commits. Grafana anonymous
+access and user signup are disabled. Prometheus has no browser login; its
+localhost binding is the access boundary for this local demo. The internal
+scrape uses HTTP over the Compose network with a bearer token from
+`credentials_file`; there are no credentials embedded in its configuration.
+
+The dashboard is provisioned automatically into **AI Gateway**. It includes
+throughput, HTTP error percentage, P95 latency, provider availability, failover,
+all three circuit states, failures/retries, tokens, and authentication/rate-limit
+rejections. It refreshes every 15 seconds. Allow two scrapes before rate graphs
+populate. With no chat traffic, latency may show “No data”.
+
+### Metrics and their meaning
+
+`GET /metrics` still returns the original JSON using the existing admin key.
+`GET /metrics/prometheus` requires the separate metrics key; admin/customer
+keys cannot scrape it. A metrics key cannot call chat, usage, or JSON metrics.
+Without a configured metrics key the new endpoint rejects every caller.
+For a non-Compose server, configure `GATEWAY_METRICS_API_KEY_FILE` alongside
+existing customer/admin configuration. Customer/admin keys also now support
+`_FILE`; setting both a key environment variable and its file is rejected.
+The server rejects a metrics key that equals a customer or admin key.
+
+| Metric | Meaning |
+| --- | --- |
+| `gateway_http_requests_total{route,method,status}` | Completed dispatched HTTP requests; filter statuses for HTTP errors |
+| `gateway_http_request_duration_seconds` | Cumulative histogram buckets, sum, count; includes authentication and response writes |
+| `gateway_provider_failures_total{provider}` | Failed simulated provider attempts |
+| `gateway_retries_total{provider}` | Additional attempts actually started after the first attempt |
+| `gateway_failovers_total{provider}` | Provider routing exhausted/skipped; includes final exhaustion if all providers fail |
+| `gateway_provider_available{provider}` | 1 when circuit is CLOSED with no consecutive failures; observed health, not an active probe |
+| `gateway_circuit_breaker_state{provider,state}` | One-hot CLOSED, OPEN, HALF_OPEN state |
+| `gateway_authentication_failures_total` | HTTP 401 responses |
+| `gateway_rate_limits_total` | HTTP 429 responses, including token quota rejections |
+| `gateway_tokens_total` | Aggregate estimated tokens after successful accounting settlement |
+
+Counters and histograms reset on process restart; Prometheus `rate()` handles
+resets. SQLite usage remains persistent and is the accounting source of truth.
+No customer, prompt, arbitrary URL, error text, or credential labels are emitted.
+Unknown routes share `unknown`, and methods are bounded. A scrape sees its own
+request on the next scrape. Malformed HTTP rejected by the standard-library
+parser before dispatch is outside request instrumentation. Circuit recovery is
+traffic-driven: OPEN becomes HALF_OPEN when a request tries that provider after
+the recovery period, then closes after a successful probe. Short HALF_OPEN
+states may occur between scrapes and never appear on a graph.
+
+Alerts are **GatewayDown** (scrape fails for 1 minute), **GatewayHighLatency**
+(chat P95 above 500 ms for 2 minutes), and **GatewayHighErrorRate** (chat 5xx
+above 10% over 5 minutes, sustained for 2 minutes). They appear in Prometheus;
+no external notification service or Alertmanager is configured. Authentication
+and rate-limit errors appear on the dashboard but do not trigger the server-error
+alert. A failed scrape can mean a process outage or a credential/config problem.
+
+### Simulate normal traffic and outages
+
+`python3 scripts/simulate_traffic.py` sends six requests per phase: normal,
+OpenAI failure with fallback, all providers timing out, and recovery. It touches
+only the Stage 6 scenario file, replaces it atomically, and restores its prior
+contents in `finally` (also on Ctrl+C). It prints HTTP codes, never keys or prompts.
+It uses the demo Enterprise tier to avoid the Starter tier's five-request limit.
+The default run takes roughly 30 seconds and uses no real AI service.
+
+For a longer observation window, use:
+
+```bash
+python3 scripts/simulate_traffic.py --requests 20 --interval 3
+```
+
+The finite demonstration does not guarantee firing sustained alerts: circuit
+breakers quickly reject repeat failures, reducing latency. Alert rule fixtures
+below verify sustained downtime, latency, and error conditions deterministically.
+Repeated quick runs may hit the existing 100 requests/minute limit; wait a minute.
+If the script is forcibly killed, reset `monitoring/runtime/simulation/outcomes.json`
+to `{}` and wait at least 5 seconds before sending recovery traffic.
+
+### Testing and actual verification
+
+```bash
+python3 -m unittest discover -v
+python3 -m compileall -q gateway scripts tests
+python3 scripts/validate_infra.py
+```
+
+Stage 6 completion verification (2026-11-16): **42 Python tests passed**,
+including authentication isolation, histogram/concurrency, outage, retry/failover,
+tokens, HTTP rejection, bounded-label, credential-file, and setup idempotency checks.
+Python compile checks and `git diff --check` passed.
+
+The checksum-verified Prometheus v3.7.3 `promtool` binary validated configuration
+syntax, all three alert rules, and the firing/healthy alert fixtures without Docker.
+Read-only HTTP checks confirmed the running gateway, Prometheus, and Grafana are
+healthy; the gateway scrape is UP; all three loaded alert rules report healthy;
+and all nine provisioned dashboard panels match the repository configuration.
+Every panel query executed successfully, the Grafana datasource health is OK,
+and token, provider failure, retry, and failover counters contain nonzero traffic.
+The traffic simulation and visible monitoring results were already present.
+
+Git exclusions were checked for credentials, `.env.monitoring`, runtime data,
+SQLite databases and sidecars, and local cloud/tool configuration. Docker's
+application-source allowlist excludes those paths from the build context.
+Verification did not modify running containers, access the Docker socket, or
+rerun traffic. Image builds, container smoke checks, and CI were not rerun in
+this pass. Full configuration path/mount validation remains in CI; the local
+promtool configuration check used `--syntax-only` because container paths are
+not host paths. For a future independent Docker-enabled verification:
+
+```bash
+# Run setup and startup commands above first.
+docker compose --env-file .env.monitoring -f compose.monitoring.yaml run --rm --no-deps --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
+docker run --rm --entrypoint promtool -v "$PWD/monitoring:/etc/prometheus:ro" -w /etc/prometheus prom/prometheus:v3.7.3 test rules alerts.test.yml
+python3 scripts/check_monitoring.py
+# Existing container smoke checks, against the newly built application image:
+SMOKE_IMAGE=ai-gateway:stage6 python3 scripts/ci_container_smoke.py
+```
+
+GitHub Actions now performs the Python suite, original image/container and
+infrastructure checks, Compose validation, promtool rule validation and tests,
+then builds the monitoring stack and verifies authenticated scraping plus Grafana
+provisioning through their HTTP APIs. CI stops only the monitoring project's
+services afterward. CI results for the completion commit remain to be checked.
+
+### Files and resource limits
+
+- `gateway/observability.py`: bounded metric registry and Prometheus text output;
+  server, router, security, and service integrate request/routing/token events.
+- `compose.monitoring.yaml`: three isolated services, localhost ports, mounted
+  secrets, CPU/memory caps, and separate persistence.
+- `monitoring/prometheus.yml`, `alerts.yml`, `alerts.test.yml`: scrape config,
+  alert rules, and deterministic alert fixtures.
+- `monitoring/grafana/`: provisioned data source, dashboard provider, dashboard JSON.
+- `scripts/setup_monitoring.py`, `simulate_traffic.py`, `check_monitoring.py`:
+  credential initialization, demo traffic, and running-stack integration checks.
+- `tests/test_observability.py` and `.github/workflows/ci.yml`: regression/CI checks.
+
+Each service is capped at half a CPU. Memory caps are 192 MiB for the gateway,
+256 MiB each for Prometheus and Grafana. Prometheus keeps up to 2 days / 256 MB
+of history (WAL/head data add overhead); Grafana persists its local database.
+Actual consumption depends on Docker and usage. Image downloads need internet
+and disk space, but require no paid services.
+
+### Troubleshooting and stopping safely
+
+- **Docker permission denied:** run the documented Docker commands outside
+  Codex with your normal authorized Docker access. No socket permissions or
+  existing containers were changed.
+- **Port already allocated:** inspect local listeners and choose a time when the
+  required ports are free. Do not terminate an unrelated server.
+- **Prometheus target DOWN / 401:** rerun setup, verify the secret files exist,
+  then recreate only this stack after credential changes. Check `/targets` for
+  the error; never print or paste credentials. Check `docker compose --env-file
+  .env.monitoring -f compose.monitoring.yaml logs --tail=50` for startup errors.
+- **Grafana permission denied:** use setup as the same non-root user who starts
+  Compose. Check `.env.monitoring` UID/GID and runtime directory ownership.
+- **Grafana login fails after changing the file:** its admin password is initialized
+  only on the first database startup; changing the file does not reset an existing
+  Grafana account. Use Grafana's password reset flow and preserve its data.
+- **Empty graphs:** run simulation, wait 30 seconds, use a 15-minute time range,
+  check the target is UP, and ensure datasource UID is `gateway-prometheus`.
+- **All providers remain OPEN:** restore `{}` in the scenario file, wait 5 seconds,
+  then send traffic. A scrape alone does not run recovery probes.
+- **Schema validation cannot download schemas:** internet access is needed for
+  kubeconform schemas; this is unrelated to Prometheus or a running cluster.
+
+Stop only Stage 6 while preserving containers, credentials, and data:
+
+```bash
+docker compose --env-file .env.monitoring -f compose.monitoring.yaml stop
+```
+
+Restart with `up -d`. Do not use `down -v`, volume deletion, or Docker prune.
+Stage 6 source and verification notes are committed together; local credentials
+and runtime data remain ignored.
+
+Official references: [Prometheus scrape authorization](https://prometheus.io/docs/prometheus/latest/configuration/configuration/),
+[alerting rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/),
+and [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/).
 
 ## Stage 5: Kubernetes, Helm, and CI
 
