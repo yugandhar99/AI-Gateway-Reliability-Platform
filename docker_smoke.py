@@ -1,4 +1,4 @@
-"""Run manually after building ai-gateway:stage4; never print credentials.""" 
+"""Run manually after building ai-gateway:stage4; never print credentials."""
 
 import json
 import os
