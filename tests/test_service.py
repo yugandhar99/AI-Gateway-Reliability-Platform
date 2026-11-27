@@ -3,7 +3,7 @@ import unittest
 from gateway.service import MAX_PROMPT_LENGTH, ValidationError, chat
 
 
-class ChatTests(unittest.TestCase): 
+class ChatTests(unittest.TestCase):
     def test_all_providers_and_normalization(self):
         for name in ("OpenAI", "Anthropic", "Gemini"):
             with self.subTest(provider=name):
