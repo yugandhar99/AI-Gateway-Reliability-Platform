@@ -1,5 +1,5 @@
 import json
-from pathlib import Path 
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
