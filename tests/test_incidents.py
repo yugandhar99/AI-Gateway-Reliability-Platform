@@ -1,6 +1,6 @@
 """Stage 7 uses actual SQLite and HTTP parsing, with deterministic metric clocks."""
 import json
-import os
+import os 
 import subprocess
 import sys
 import unittest
