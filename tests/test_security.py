@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from email.message import Message
 import json
-from pathlib import Path 
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
