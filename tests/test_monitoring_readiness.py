@@ -1,4 +1,4 @@
-import io 
+import io
 from contextlib import redirect_stdout
 from http.client import RemoteDisconnected
 from types import SimpleNamespace
